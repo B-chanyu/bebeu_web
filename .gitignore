@@ -1,0 +1,55 @@
+# Runtime dependencies
+node_modules/
+**/node_modules/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+push-vapid.json
+**/push-vapid.json
+*secret*
+*token*
+*credential*
+
+# Runtime data
+bebeu_image/
+app_logs/
+logs/
+naver-cafe-browser/
+**/naver-cafe-browser/
+
+# Legacy local version kept outside portfolio history
+bebeu/v1/
+
+# Local tool/cache folders
+.codex/
+.agents/
+.codex-audio-tools/
+.npm-cache/
+
+# Database dumps and local backups
+*.sql.gz
+*.dump
+*.bak
+*.backup
+*.sqlite
+*.sqlite3
+*.db
+
+# Archives and generated bundles
+*.zip
+*.7z
+*.rar
+dist/
+build/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+
+# Native build output
+**/android/app/build/
+**/ios/App/build/

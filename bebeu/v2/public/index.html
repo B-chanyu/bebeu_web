@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#124f46">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="bebeu">
+    <meta name="application-name" content="bebeu">
+    <meta name="format-detection" content="telephone=no">
+    <title>BEBEU WORK</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/icons/icon-192.png" type="image/png">
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+    <link rel="stylesheet" href="/styles.css?v=300">
+  </head>
+  <body>
+    <main id="app" class="app-shell">
+      <section class="topbar">
+        <div>
+          <p class="eyebrow">bebeu Work</p>
+          <h1 id="screenTitle">내 정보</h1>
+        </div>
+        <button id="refreshButton" class="icon-button" type="button" aria-label="새로고침">↻</button>
+      </section>
+
+      <section id="content" class="content"></section>
+
+      <nav class="bottom-tabs" aria-label="주요 메뉴">
+        <button class="tab-button is-active" type="button" data-tab="me">
+          <span class="tab-icon">●</span>
+          <span>내 정보</span>
+        </button>
+        <button class="tab-button" type="button" data-tab="chat">
+          <span class="tab-icon">✉</span>
+          <span>채팅</span>
+        </button>
+        <button class="tab-button" type="button" data-tab="work">
+          <span class="tab-icon">◆</span>
+          <span>진행 중</span>
+        </button>
+        <button class="tab-button" type="button" data-tab="done">
+          <span class="tab-icon">✓</span>
+          <span>완료</span>
+        </button>
+        <button class="tab-button" type="button" data-tab="more">
+          <span class="tab-icon">☰</span>
+          <span>설정</span>
+        </button>
+      </nav>
+    </main>
+
+    <dialog id="orderDialog" class="sheet">
+      <form id="orderForm" method="dialog">
+        <div class="sheet-head">
+          <div>
+            <p class="eyebrow">New Order</p>
+            <h2>작업 추가</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog="orderDialog" aria-label="닫기">×</button>
+        </div>
+        <section class="paste-box">
+          <div class="order-type-row" aria-label="작업 형식">
+            <button class="type-button is-active" type="button" data-order-type="A">A</button>
+            <button class="type-button" type="button" data-order-type="B">B</button>
+            <button class="type-button" type="button" data-order-type="AB">AB</button>
+            <button class="type-button" type="button" data-order-type="BA">BA</button>
+          </div>
+          <label>붙여넣기
+            <textarea id="orderPasteInput" rows="3" placeholder="복사한 내용을 입력해 주세요"></textarea>
+          </label>
+          <button class="secondary-button" type="button" id="parseOrderPasteButton">확인</button>
+        </section>
+        <label data-order-field="serial">품번<input name="serial" placeholder="A 또는 B 품번" required></label>
+        <label data-order-field="contactTail">연락처 뒷번호<input name="contactTail" placeholder="3605"></label>
+        <label data-order-field="dateRange">시작일자 / 완료일자<input name="dateRange" placeholder="0627"></label>
+        <label data-order-field="address">주소<input name="address" placeholder="고객 주소"></label>
+        <label data-order-field="doorInfo">현관 및 비밀번호<input name="doorInfo" placeholder="동호수, 현관 비밀번호"></label>
+        <section class="product-detail-box" data-order-field="productDetails">
+          <section class="product-list" id="productFields"></section>
+        </section>
+        <fieldset class="choice-group legacy-product-type" data-order-field="productType">
+          <legend>제품 종류</legend>
+          <label><input type="checkbox" name="productType" value="카시트"><span>카시트</span></label>
+          <label><input type="checkbox" name="productType" value="유모차"><span>유모차</span></label>
+        </fieldset>
+        <div class="form-grid legacy-product-fields">
+          <label data-order-field="brand">브랜드<input name="brand" placeholder="브랜드"></label>
+          <label data-order-field="modelName">모델명<input name="modelName" placeholder="모델명"></label>
+        </div>
+        <label data-order-field="customerName">고객 이름<input name="customerName" placeholder="고객 이름"></label>
+        <label data-order-field="contamination">오염<input name="contamination" placeholder="곰팡이, 오염 등"></label>
+        <div class="form-grid">
+          <label data-order-field="price">비용<input name="price" placeholder="52,000원"></label>
+          <label data-order-field="payment">결제 여부<input name="payment" placeholder="선결"></label>
+        </div>
+        <label>기타 사항<textarea name="requestMemo" rows="3" placeholder="예약설명, 가격, 기타 메모"></textarea></label>
+        <label>중요<textarea name="specialMemo" rows="3" placeholder="목록에 바로 보일 중요 내용"></textarea></label>
+        <button class="primary-button" type="submit">작업 저장</button>
+      </form>
+    </dialog>
+
+    <dialog id="editOrderDialog" class="sheet">
+      <form id="editOrderForm" method="dialog">
+        <div class="sheet-head">
+          <div>
+            <p class="eyebrow">Edit Order</p>
+            <h2>정보 수정</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog="editOrderDialog" aria-label="닫기">×</button>
+        </div>
+        <label>품번<input name="serial" placeholder="품번"></label>
+        <label>고객 이름<input name="customerName" placeholder="고객 이름"></label>
+        <label>주소<input name="address" placeholder="주소"></label>
+        <fieldset class="choice-group">
+          <legend>제품 종류</legend>
+          <label><input type="checkbox" name="productType" value="카시트"><span>카시트</span></label>
+          <label><input type="checkbox" name="productType" value="유모차"><span>유모차</span></label>
+        </fieldset>
+        <div class="form-grid">
+          <label>브랜드<input name="brand" placeholder="브랜드"></label>
+          <label>모델명<input name="modelName" placeholder="모델명"></label>
+        </div>
+        <label>기타 사항<textarea name="requestMemo" rows="6" placeholder="제품 정보, 연락처, 접수날짜 등"></textarea></label>
+        <label>중요<textarea name="specialMemo" rows="3" placeholder="목록과 상세에 빨간색으로 보일 중요 내용"></textarea></label>
+        <button class="primary-button" type="submit">정보 저장</button>
+      </form>
+    </dialog>
+
+    <dialog id="photoDialog" class="sheet">
+      <form id="photoForm" method="dialog">
+        <div class="sheet-head">
+          <div>
+            <p class="eyebrow">Photo</p>
+            <h2>사진 추가</h2>
+          </div>
+          <button class="icon-button" type="button" data-close-dialog="photoDialog" aria-label="닫기">×</button>
+        </div>
+        <div class="photo-source-row">
+          <button class="source-button" type="button" id="takePhotoButton">
+            <span>📷</span>
+            <strong>사진 찍기</strong>
+          </button>
+          <button class="source-button" type="button" id="pickPhotoButton">
+            <span>🖼</span>
+            <strong>갤러리</strong>
+          </button>
+        </div>
+        <input id="cameraInput" class="hidden-file" type="file" accept="image/*" capture="environment">
+        <input
+          id="galleryInput"
+          class="hidden-file"
+          type="file"
+          multiple
+          accept="image/*"
+        >
+        <label>메모<textarea id="photoMemo" rows="3" placeholder="사진과 함께 저장할 메모"></textarea></label>
+        <div id="photoPreview" class="photo-preview"></div>
+        <button class="primary-button" type="submit">사진 저장</button>
+      </form>
+    </dialog>
+
+    <script src="/app.js?v=300"></script>
+  </body>
+</html>
