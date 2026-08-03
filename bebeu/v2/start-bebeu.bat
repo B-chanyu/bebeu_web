@@ -43,6 +43,14 @@ echo.
 echo Close this window to stop the server.
 echo.
 
+npm run build:app
+if errorlevel 1 (
+  echo.
+  echo Failed to build public app.
+  pause
+  exit /b 1
+)
+
 node server.js
 
 echo.

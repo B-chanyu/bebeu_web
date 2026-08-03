@@ -32,6 +32,7 @@ C:\bebeyu
 ├─ bebeu
 │  ├─ v1                 # 이전 버전 보관
 │  └─ v2                 # 현재 운영 버전
+│     ├─ src/app         # 기능별 frontend source
 │     ├─ public          # PWA frontend
 │     ├─ database        # schema/migration SQL
 │     ├─ scripts         # maintenance scripts
@@ -50,6 +51,9 @@ npm install
 copy .env.example .env
 npm start
 ```
+
+Frontend source is split by feature under `bebeu/v2/src/app`.
+`npm run build:app` generates `bebeu/v2/public/app.js`.
 
 실행 후 접속:
 

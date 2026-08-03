@@ -31,4 +31,9 @@ Write-Host "사진 저장 위치: $photoRoot"
 Write-Host "데이터베이스: MariaDB bebeu"
 Write-Host ""
 
+npm run build:app
+if ($LASTEXITCODE -ne 0) {
+  throw "Failed to build public app."
+}
+
 node server.js

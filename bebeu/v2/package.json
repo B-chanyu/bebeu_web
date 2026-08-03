@@ -4,7 +4,8 @@
   "private": true,
   "description": "bebeu internal PWA for work progress, photos, attendance, and export.",
   "scripts": {
-    "start": "node server.js",
+    "build:app": "node scripts/build-public-app.js",
+    "start": "npm run build:app && node server.js",
     "check:encoding": "node scripts/check-text-integrity.js",
     "check": "node --check server.js && node --check public/app.js && node --check public/sw.js && npm run check:encoding",
     "native:sync": "cap sync",

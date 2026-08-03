@@ -1,9 +1,9 @@
-const CACHE_NAME = "bebeu-pwa-v300";
+const CACHE_NAME = "bebeu-pwa-v301";
 const APP_SHELL = [
   "/",
   "/index.html",
-  "/styles.css?v=300",
-  "/app.js?v=300",
+  "/styles.css?v=301",
+  "/app.js?v=301",
   "/manifest.webmanifest",
   "/icons/icon-192.png",
   "/icons/icon-512.png",
