@@ -58,7 +58,7 @@ const appFontSizeRules = [];
 let appFontSizesCaptured = false;
 let deferredInstallPrompt = null;
 const APP_SERVER_KEY = "bebeu.nativeServerUrl";
-const CUSTOMER_SHARE_CACHE_VERSION = "301";
+const CUSTOMER_SHARE_CACHE_VERSION = "305";
 
 const state = {
   tab: "me",
@@ -68,6 +68,8 @@ const state = {
   selectedStep: "all",
   query: "",
   chatSearchIndex: 0,
+  preserveChatScrollOnRender: false,
+  preservedChatScrollTop: 0,
   chatRoom: "main",
   chatComposerStepCode: "01",
   filter: "all",
@@ -412,7 +414,7 @@ function activeUser() {
 }
 
 function isAdminUser(user = activeUser()) {
-  return user?.role === "관리자";
+  return user?.role === "관리자" || user?.role === "愿由ъ옄";
 }
 
 function userFontScaleKey(userId = state.currentUserId) {
@@ -928,7 +930,8 @@ function renderChat() {
     ${state.chatExpandedAttachmentId ? renderChatExpandedAttachment() : ""}
     ${state.chatTransferMessageId ? renderChatTransferPanel() : ""}
   `;
-  if (state.query.trim()) scrollChatSearchMatch();
+  if (state.preserveChatScrollOnRender) restoreChatScrollAfterRender();
+  else if (state.query.trim()) scrollChatSearchMatch();
   else scrollChatToBottom();
 }
 
@@ -1241,6 +1244,22 @@ function refreshChatFeed() {
   else scrollChatToBottom();
 }
 
+function rememberChatScrollForRender() {
+  const feed = document.querySelector(".chat-message-feed");
+  state.preservedChatScrollTop = feed ? feed.scrollTop : 0;
+  state.preserveChatScrollOnRender = true;
+}
+
+function restoreChatScrollAfterRender() {
+  const top = state.preservedChatScrollTop || 0;
+  state.preserveChatScrollOnRender = false;
+  state.preservedChatScrollTop = 0;
+  requestAnimationFrame(() => {
+    const feed = document.querySelector(".chat-message-feed");
+    if (feed) feed.scrollTop = top;
+  });
+}
+
 function refreshChatSearchControls() {
   const controls = document.querySelector(".chat-search-controls");
   if (controls) controls.outerHTML = renderChatSearchControls();
@@ -1353,7 +1372,6 @@ function renderLogin() {
 }
 
 function renderLoginUser(user) {
-  const needsPassword = isAdminUser(user);
   const selected = state.pendingAdminLoginUserId === user.id;
   return `
     <button class="login-user" type="button" data-login-user="${user.id}">
@@ -1361,12 +1379,12 @@ function renderLoginUser(user) {
         <strong>${escapeDisplay(user.name)}</strong>
         <small>${escapeDisplay(user.branch || "본점")} · ${escapeDisplay(user.role)}</small>
       </span>
-      <em>${needsPassword ? "확인" : "시작"}</em>
+      <em>로그인</em>
     </button>
-    ${needsPassword && selected ? `
+    ${selected ? `
       <form class="admin-login-form" id="adminLoginForm">
         <input type="hidden" name="userId" value="${escapeHtml(user.id)}">
-        <label>관리자 비밀번호
+        <label>비밀번호
           <input name="password" type="password" inputmode="numeric" autocomplete="current-password" placeholder="비밀번호 입력" required autofocus>
         </label>
         ${state.adminLoginError ? `<p class="form-error">${escapeHtml(state.adminLoginError)}</p>` : ""}
@@ -1400,7 +1418,7 @@ async function submitAdminLogin(form) {
   const userId = String(formData.get("userId") || "");
   const password = String(formData.get("password") || "");
   try {
-    await api("/api/auth/admin-login", {
+    await api("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ userId, password }),
     });
@@ -1423,7 +1441,7 @@ async function submitAdminPasswordChange(form) {
     return;
   }
   try {
-    await api("/api/auth/admin-password", {
+    await api("/api/auth/password", {
       method: "POST",
       body: JSON.stringify({ currentPassword, newPassword }),
     });
@@ -3598,7 +3616,7 @@ function exportStatusLabel(order) {
 }
 
 function renderPasswordChangeForm() {
-  if (!isAdminUser() || !state.passwordChangeOpen) return "";
+  if (!state.passwordChangeOpen) return "";
   return `
     <form class="password-change-form" id="adminPasswordForm">
       <label>현재 비밀번호
@@ -3761,7 +3779,7 @@ function renderMore() {
       <p class="helper">현재 사용자: ${escapeHtml(user.name)} · ${escapeHtml(user.role)}</p>
       <div class="settings-action-row">
         <button class="danger-button" type="button" id="logoutButton">로그아웃</button>
-        ${isAdminUser(user) ? `<button class="secondary-button" type="button" id="togglePasswordChangeButton">비밀번호 변경</button>` : ""}
+        <button class="secondary-button" type="button" id="togglePasswordChangeButton">비밀번호 변경</button>
       </div>
       ${renderPasswordChangeForm()}
     </section>
@@ -3776,9 +3794,62 @@ function renderMore() {
         <button class="secondary-button" type="button" id="saveNativeServerButton">서버 주소 변경</button>
       ` : ""}
     </section>
+    ${renderMemberManagementSetting()}
     ${state.trashExpandedPhotoId ? renderTrashExpandedPhoto() : ""}
   `;
   refreshPushNotificationSetting();
+}
+
+function renderMemberManagementSetting() {
+  const user = activeUser();
+  if (!isAdminUser(user)) return "";
+  const users = state.data.users || [];
+  const adminCount = users.filter((member) => isAdminUser(member)).length;
+  return `
+    <section class="panel stack member-management-panel">
+      <div class="section-title">
+        <div>
+          <p class="eyebrow">Security</p>
+          <h3>멤버 관리</h3>
+        </div>
+        <span class="chip">${users.length}명</span>
+      </div>
+      <form id="memberManagementForm" class="member-management-form">
+        <label>이름
+          <input name="name" type="text" autocomplete="off" placeholder="멤버 이름" required>
+        </label>
+        <label>권한
+          <select name="role">
+            <option value="직원">직원</option>
+            <option value="관리자">관리자</option>
+          </select>
+        </label>
+        <label>비밀번호
+          <input name="password" type="password" autocomplete="new-password" inputmode="numeric" placeholder="미입력 시 0701">
+        </label>
+        <button class="primary-button" type="submit">멤버 추가</button>
+      </form>
+      <div class="member-list">
+        ${users.map((member) => {
+          const isSelf = member.id === user.id;
+          const isLastAdmin = isAdminUser(member) && adminCount <= 1;
+          const locked = isSelf || isLastAdmin;
+          return `
+            <article class="member-row">
+              <div>
+                <strong>${escapeHtml(member.name)}</strong>
+                <small>${isAdminUser(member) ? "관리자" : "직원"} · ${escapeHtml(member.branch || "본점")}</small>
+              </div>
+              <button class="danger-button compact" type="button" data-delete-member="${escapeHtml(member.id)}" ${locked ? "disabled" : ""}>
+                삭제
+              </button>
+            </article>
+          `;
+        }).join("")}
+      </div>
+      <p class="helper">삭제한 멤버는 로그인 목록에서 숨겨지고, 기존 작업/근태 기록은 보존됩니다.</p>
+    </section>
+  `;
 }
 
 function isStandaloneApp() {
@@ -3868,14 +3939,11 @@ async function handleClick(event) {
 
   if (target.dataset.loginUser) {
     const user = state.data.users.find((item) => item.id === target.dataset.loginUser);
-    if (isAdminUser(user)) {
-      state.pendingAdminLoginUserId = user.id;
-      state.adminLoginError = "";
-      render();
-      requestAnimationFrame(() => document.querySelector("#adminLoginForm input[name='password']")?.focus());
-      return;
-    }
-    loginAsUser(target.dataset.loginUser);
+    if (!user) return;
+    state.pendingAdminLoginUserId = user.id;
+    state.adminLoginError = "";
+    render();
+    requestAnimationFrame(() => document.querySelector("#adminLoginForm input[name='password']")?.focus());
     return;
   }
 
@@ -3915,6 +3983,7 @@ async function handleClick(event) {
   }
 
   if (target.dataset.chatAttachment) {
+    rememberChatScrollForRender();
     state.chatExpandedAttachmentId = target.dataset.chatAttachment;
     resetLightboxZoom();
     render();
@@ -4404,6 +4473,10 @@ async function handleClick(event) {
     requestAnimationFrame(() => document.querySelector("#adminPasswordForm input[name='currentPassword']")?.focus());
     return;
   }
+  if (target.dataset.deleteMember) {
+    await deleteMember(target.dataset.deleteMember);
+    return;
+  }
   if (target.id === "backToList") {
     state.selectedOrderId = null;
     state.smsTemplateSlots = {};
@@ -4722,6 +4795,56 @@ async function saveAdminMemos() {
   });
   await load();
   alert("관리자 메모를 저장했습니다.");
+}
+
+async function submitMemberManagement(form) {
+  if (!isAdminUser()) return;
+  const formData = new FormData(form);
+  const payload = {
+    name: String(formData.get("name") || "").trim(),
+    role: String(formData.get("role") || "직원"),
+    password: String(formData.get("password") || ""),
+  };
+  if (!payload.name) {
+    alert("멤버 이름을 입력해주세요.");
+    return;
+  }
+  if (payload.password && payload.password.length < 4) {
+    alert("비밀번호는 4자리 이상으로 입력해주세요.");
+    return;
+  }
+  try {
+    setGlobalLoading("멤버 추가 중...");
+    await waitForPaint();
+    const result = await api("/api/members", { method: "POST", body: JSON.stringify(payload) });
+    state.data.users = result.users || state.data.users;
+    form.reset();
+    render();
+    showToast("멤버가 추가되었습니다.");
+  } catch (error) {
+    alert(error.message || "멤버를 추가하지 못했습니다.");
+  } finally {
+    setGlobalLoading("");
+  }
+}
+
+async function deleteMember(userId) {
+  if (!isAdminUser()) return;
+  const member = state.data.users.find((item) => item.id === userId);
+  if (!member) return;
+  if (!confirm(`${member.name} 멤버를 삭제하시겠습니까?`)) return;
+  try {
+    setGlobalLoading("멤버 삭제 중...");
+    await waitForPaint();
+    const result = await api(`/api/members/${encodeURIComponent(userId)}`, { method: "DELETE" });
+    state.data.users = result.users || state.data.users;
+    render();
+    showToast("멤버가 삭제되었습니다.");
+  } catch (error) {
+    alert(error.message || "멤버를 삭제하지 못했습니다.");
+  } finally {
+    setGlobalLoading("");
+  }
 }
 
 function addChecklistRow() {
@@ -5285,6 +5408,7 @@ function navigateChatExpandedAttachment(direction) {
   if (index < 0) return false;
   const nextIndex = direction === "previous" ? index - 1 : index + 1;
   if (!attachments[nextIndex]) return false;
+  rememberChatScrollForRender();
   state.chatExpandedAttachmentId = attachments[nextIndex].id;
   resetLightboxZoom();
   render();
@@ -5422,6 +5546,7 @@ function handlePhotoTap(event) {
       return;
     }
     if (state.chatExpandedAttachmentId) {
+      rememberChatScrollForRender();
       state.chatExpandedAttachmentId = null;
       resetLightboxZoom();
       render();
@@ -6682,6 +6807,11 @@ content.addEventListener("submit", async (event) => {
     await submitAdminPasswordChange(event.target);
     return;
   }
+  if (event.target.id === "memberManagementForm") {
+    event.preventDefault();
+    await submitMemberManagement(event.target);
+    return;
+  }
   if (event.target.id === "naverCafeSettingsForm") {
     event.preventDefault();
     await submitNaverCafeSettings(event.target);
@@ -6851,6 +6981,7 @@ document.querySelector("#refreshButton").addEventListener("click", async () => {
 
 window.addEventListener("popstate", (event) => {
   if (state.chatExpandedAttachmentId) {
+    rememberChatScrollForRender();
     state.chatExpandedAttachmentId = null;
     resetLightboxZoom();
     history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);

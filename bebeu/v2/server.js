@@ -49,7 +49,8 @@ const MYSQL_USER = process.env.MYSQL_USER || "root";
 const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || "";
 const MYSQL_DATABASE = process.env.MYSQL_DATABASE || "bebeu";
 const MYSQL_EXE = process.env.MYSQL_EXE || findMysqlExe();
-const DEFAULT_ADMIN_PASSWORD = process.env.DEFAULT_ADMIN_PASSWORD || "";
+const DEFAULT_MEMBER_PASSWORD = process.env.DEFAULT_MEMBER_PASSWORD || "0701";
+const DEFAULT_ADMIN_PASSWORD = process.env.DEFAULT_ADMIN_PASSWORD || DEFAULT_MEMBER_PASSWORD;
 const NAVER_CAFE_API_BASE = "https://openapi.naver.com/v1/cafe";
 const NAVER_AUTH_BASE = "https://nid.naver.com/oauth2.0";
 const NAVER_DEFAULT_CLIENT_ID = process.env.NAVER_CLIENT_ID || "";
@@ -735,14 +736,18 @@ function passwordHash(value) {
   return createHash("sha256").update(String(value || "")).digest("hex");
 }
 
-function passwordMatches(storedHash, input) {
+function passwordMatches(storedHash, input, role = "") {
   const value = String(input || "");
-  if (!storedHash) return value === DEFAULT_ADMIN_PASSWORD;
+  if (!storedHash) return value === (isAdminRoleValue(role) ? DEFAULT_ADMIN_PASSWORD : DEFAULT_MEMBER_PASSWORD);
   return storedHash === passwordHash(value);
 }
 
+const ADMIN_ROLE_LABEL = "관리자";
+const STAFF_ROLE_LABEL = "직원";
+const LEGACY_ADMIN_ROLE_LABEL = "愿由ъ옄";
+
 function isAdminRoleValue(role) {
-  return role === "관리자";
+  return role === ADMIN_ROLE_LABEL || role === LEGACY_ADMIN_ROLE_LABEL;
 }
 
 function parseJsonField(value, fallback) {
@@ -811,6 +816,12 @@ async function ensureMariaDbColumnsOnce() {
     ))[0]?.[0] === "1";
     if (!hasUserPasswordColumn) {
       await mysqlExec(`ALTER TABLE users ADD COLUMN users_password_hash VARCHAR(128) NULL AFTER users_role`);
+    }
+    const hasUserActiveColumn = (await mysqlQuery(
+      `SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ${sql(MYSQL_DATABASE)} AND TABLE_NAME = 'users' AND COLUMN_NAME = 'users_is_active'`
+    ))[0]?.[0] === "1";
+    if (!hasUserActiveColumn) {
+      await mysqlExec(`ALTER TABLE users ADD COLUMN users_is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER users_password_hash`);
     }
     const hasRegistrationDateColumn = (await mysqlQuery(
       `SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ${sql(MYSQL_DATABASE)} AND TABLE_NAME = 'orders' AND COLUMN_NAME = 'orders_registration_date'`
@@ -1053,7 +1064,7 @@ async function readMariaDb() {
     await ensureMariaDbColumns();
     await cleanupExpiredChatMessages();
     await cleanupExpiredTrashPhotos();
-    const users = (await mysqlQuery("SELECT users_idx,users_name,users_role,COALESCE((SELECT branches_name FROM branches WHERE branches.branches_idx = users.users_branch_idx),'본점'),users_clocked_in,users_clock_in_at FROM users ORDER BY users_created_at,users_idx"))
+    const users = (await mysqlQuery("SELECT users_idx,users_name,users_role,COALESCE((SELECT branches_name FROM branches WHERE branches.branches_idx = users.users_branch_idx),'본점'),users_clocked_in,users_clock_in_at FROM users WHERE COALESCE(users_is_active,1)=1 ORDER BY users_created_at,users_idx"))
       .map(([id, name, role, branch, clockedIn, clockInAt]) => ({
         id,
         name,
@@ -2287,7 +2298,7 @@ async function autoCloseOvernightAttendance(db) {
 }
 
 async function readUsersOnly() {
-  return (await mysqlQuery("SELECT users_idx,users_name,users_role,COALESCE((SELECT branches_name FROM branches WHERE branches.branches_idx = users.users_branch_idx),'본점'),users_clocked_in,users_clock_in_at FROM users ORDER BY users_created_at,users_idx"))
+  return (await mysqlQuery("SELECT users_idx,users_name,users_role,COALESCE((SELECT branches_name FROM branches WHERE branches.branches_idx = users.users_branch_idx),'본점'),users_clocked_in,users_clock_in_at FROM users WHERE COALESCE(users_is_active,1)=1 ORDER BY users_created_at,users_idx"))
     .map(([id, name, role, branch, clockedIn, clockInAt]) => ({
       id,
       name,
@@ -2296,6 +2307,29 @@ async function readUsersOnly() {
       clockedIn: clockedIn === "1",
       clockInAt: clockInAt ? new Date(clockInAt).toISOString() : null,
     }));
+}
+
+function getRequestAdmin(req, users) {
+  const userId = req.headers["x-user-id"];
+  if (!userId) return null;
+  const user = users.find((item) => item.id === userId);
+  return user && isAdminRoleValue(user.role) ? user : null;
+}
+
+function normalizeMemberRole(value) {
+  return isAdminRoleValue(value) || value === "admin" ? ADMIN_ROLE_LABEL : STAFF_ROLE_LABEL;
+}
+
+function normalizeMemberName(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, 80);
+}
+
+async function insertMemberRow(member) {
+  await mysqlExec(`INSERT INTO users (users_idx,users_branch_idx,users_name,users_role,users_password_hash,users_is_active,users_clocked_in,users_clock_in_at) VALUES (${sql(member.id)},'branch-1',${sql(member.name)},${sql(member.role)},${sql(member.passwordHash)},1,0,NULL)`);
+}
+
+async function deactivateMemberRow(userId) {
+  await mysqlExec(`UPDATE users SET users_is_active=0, users_clocked_in=0, users_clock_in_at=NULL WHERE users_idx=${sql(userId)}`);
 }
 
 function mapOrderRow(row) {
@@ -4154,27 +4188,67 @@ async function handleApi(req, res, pathname) {
     }
   }
 
-  if (req.method === "POST" && pathname === "/api/auth/admin-login") {
+  if (req.method === "POST" && (pathname === "/api/auth/login" || pathname === "/api/auth/admin-login")) {
     const body = await readBody(req);
     const db = { users: await readUsersOnly() };
     const user = db.users.find((item) => item.id === body.userId);
-    if (!user || !isAdminRoleValue(user.role)) return sendJson(res, 403, { error: "관리자 계정을 선택해주세요." });
+    if (!user) return sendJson(res, 403, { error: "계정을 선택해주세요." });
+    if (pathname === "/api/auth/admin-login" && !isAdminRoleValue(user.role)) return sendJson(res, 403, { error: "관리자 계정을 선택해주세요." });
     const storedHash = await readUserPasswordHash(user.id);
-    if (!passwordMatches(storedHash, body.password)) return sendJson(res, 401, { error: "비밀번호가 맞지 않습니다." });
+    if (!passwordMatches(storedHash, body.password, user.role)) return sendJson(res, 401, { error: "비밀번호가 맞지 않습니다." });
     return sendJson(res, 200, { user });
   }
 
-  if (req.method === "POST" && pathname === "/api/auth/admin-password") {
+  if (req.method === "POST" && (pathname === "/api/auth/password" || pathname === "/api/auth/admin-password")) {
     const db = { users: await readUsersOnly() };
     const user = getRequestUser(req, db);
-    if (!user || !isAdminRoleValue(user.role)) return sendJson(res, 403, { error: "관리자만 비밀번호를 변경할 수 있습니다." });
+    if (!user) return sendJson(res, 403, { error: "로그인이 필요합니다." });
     const body = await readBody(req);
     const nextPassword = String(body.newPassword || "");
     if (nextPassword.length < 4) return sendJson(res, 400, { error: "새 비밀번호는 4자리 이상으로 입력해주세요." });
     const storedHash = await readUserPasswordHash(user.id);
-    if (!passwordMatches(storedHash, body.currentPassword)) return sendJson(res, 401, { error: "현재 비밀번호가 맞지 않습니다." });
+    if (!passwordMatches(storedHash, body.currentPassword, user.role)) return sendJson(res, 401, { error: "현재 비밀번호가 맞지 않습니다." });
     await updateUserPasswordHash(user.id, passwordHash(nextPassword));
     return sendJson(res, 200, { ok: true });
+  }
+
+  if (req.method === "POST" && pathname === "/api/members") {
+    const users = await readUsersOnly();
+    const admin = getRequestAdmin(req, users);
+    if (!admin) return sendJson(res, 403, { error: "관리자만 멤버를 추가할 수 있습니다." });
+    const body = await readBody(req);
+    const name = normalizeMemberName(body.name);
+    if (!name) return sendJson(res, 400, { error: "멤버 이름을 입력해주세요." });
+    const role = normalizeMemberRole(body.role);
+    const password = String(body.password || "");
+    if (password && password.length < 4) return sendJson(res, 400, { error: "비밀번호는 4자리 이상으로 입력해주세요." });
+    const member = {
+      id: randomUUID(),
+      name,
+      role,
+      branch: "본점",
+      passwordHash: passwordHash(password || DEFAULT_MEMBER_PASSWORD),
+      clockedIn: false,
+      clockInAt: null,
+    };
+    await insertMemberRow(member);
+    return sendJson(res, 201, { users: await readUsersOnly() });
+  }
+
+  const memberMatch = pathname.match(/^\/api\/members\/([^/]+)$/);
+  if (memberMatch && req.method === "DELETE") {
+    const users = await readUsersOnly();
+    const admin = getRequestAdmin(req, users);
+    if (!admin) return sendJson(res, 403, { error: "관리자만 멤버를 삭제할 수 있습니다." });
+    const memberId = decodeURIComponent(memberMatch[1]);
+    const member = users.find((item) => item.id === memberId);
+    if (!member) return sendJson(res, 404, { error: "멤버를 찾을 수 없습니다." });
+    if (member.id === admin.id) return sendJson(res, 400, { error: "현재 로그인한 관리자 계정은 삭제할 수 없습니다." });
+    if (isAdminRoleValue(member.role) && users.filter((item) => isAdminRoleValue(item.role)).length <= 1) {
+      return sendJson(res, 400, { error: "마지막 관리자 계정은 삭제할 수 없습니다." });
+    }
+    await deactivateMemberRow(member.id);
+    return sendJson(res, 200, { users: await readUsersOnly() });
   }
 
   if (req.method === "GET" && pathname === "/api/push/public-key") {

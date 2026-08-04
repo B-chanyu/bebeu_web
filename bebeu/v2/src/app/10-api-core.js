@@ -197,7 +197,7 @@ function activeUser() {
 }
 
 function isAdminUser(user = activeUser()) {
-  return user?.role === "관리자";
+  return user?.role === "관리자" || user?.role === "愿由ъ옄";
 }
 
 function userFontScaleKey(userId = state.currentUserId) {

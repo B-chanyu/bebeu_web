@@ -244,7 +244,7 @@ function exportStatusLabel(order) {
 }
 
 function renderPasswordChangeForm() {
-  if (!isAdminUser() || !state.passwordChangeOpen) return "";
+  if (!state.passwordChangeOpen) return "";
   return `
     <form class="password-change-form" id="adminPasswordForm">
       <label>현재 비밀번호
@@ -407,7 +407,7 @@ function renderMore() {
       <p class="helper">현재 사용자: ${escapeHtml(user.name)} · ${escapeHtml(user.role)}</p>
       <div class="settings-action-row">
         <button class="danger-button" type="button" id="logoutButton">로그아웃</button>
-        ${isAdminUser(user) ? `<button class="secondary-button" type="button" id="togglePasswordChangeButton">비밀번호 변경</button>` : ""}
+        <button class="secondary-button" type="button" id="togglePasswordChangeButton">비밀번호 변경</button>
       </div>
       ${renderPasswordChangeForm()}
     </section>
@@ -422,9 +422,62 @@ function renderMore() {
         <button class="secondary-button" type="button" id="saveNativeServerButton">서버 주소 변경</button>
       ` : ""}
     </section>
+    ${renderMemberManagementSetting()}
     ${state.trashExpandedPhotoId ? renderTrashExpandedPhoto() : ""}
   `;
   refreshPushNotificationSetting();
+}
+
+function renderMemberManagementSetting() {
+  const user = activeUser();
+  if (!isAdminUser(user)) return "";
+  const users = state.data.users || [];
+  const adminCount = users.filter((member) => isAdminUser(member)).length;
+  return `
+    <section class="panel stack member-management-panel">
+      <div class="section-title">
+        <div>
+          <p class="eyebrow">Security</p>
+          <h3>멤버 관리</h3>
+        </div>
+        <span class="chip">${users.length}명</span>
+      </div>
+      <form id="memberManagementForm" class="member-management-form">
+        <label>이름
+          <input name="name" type="text" autocomplete="off" placeholder="멤버 이름" required>
+        </label>
+        <label>권한
+          <select name="role">
+            <option value="직원">직원</option>
+            <option value="관리자">관리자</option>
+          </select>
+        </label>
+        <label>비밀번호
+          <input name="password" type="password" autocomplete="new-password" inputmode="numeric" placeholder="미입력 시 0701">
+        </label>
+        <button class="primary-button" type="submit">멤버 추가</button>
+      </form>
+      <div class="member-list">
+        ${users.map((member) => {
+          const isSelf = member.id === user.id;
+          const isLastAdmin = isAdminUser(member) && adminCount <= 1;
+          const locked = isSelf || isLastAdmin;
+          return `
+            <article class="member-row">
+              <div>
+                <strong>${escapeHtml(member.name)}</strong>
+                <small>${isAdminUser(member) ? "관리자" : "직원"} · ${escapeHtml(member.branch || "본점")}</small>
+              </div>
+              <button class="danger-button compact" type="button" data-delete-member="${escapeHtml(member.id)}" ${locked ? "disabled" : ""}>
+                삭제
+              </button>
+            </article>
+          `;
+        }).join("")}
+      </div>
+      <p class="helper">삭제한 멤버는 로그인 목록에서 숨겨지고, 기존 작업/근태 기록은 보존됩니다.</p>
+    </section>
+  `;
 }
 
 function isStandaloneApp() {

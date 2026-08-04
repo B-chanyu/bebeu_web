@@ -55,7 +55,7 @@ const appFontSizeRules = [];
 let appFontSizesCaptured = false;
 let deferredInstallPrompt = null;
 const APP_SERVER_KEY = "bebeu.nativeServerUrl";
-const CUSTOMER_SHARE_CACHE_VERSION = "301";
+const CUSTOMER_SHARE_CACHE_VERSION = "305";
 
 const state = {
   tab: "me",
@@ -65,6 +65,8 @@ const state = {
   selectedStep: "all",
   query: "",
   chatSearchIndex: 0,
+  preserveChatScrollOnRender: false,
+  preservedChatScrollTop: 0,
   chatRoom: "main",
   chatComposerStepCode: "01",
   filter: "all",

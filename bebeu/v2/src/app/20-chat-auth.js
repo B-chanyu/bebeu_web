@@ -24,7 +24,8 @@ function renderChat() {
     ${state.chatExpandedAttachmentId ? renderChatExpandedAttachment() : ""}
     ${state.chatTransferMessageId ? renderChatTransferPanel() : ""}
   `;
-  if (state.query.trim()) scrollChatSearchMatch();
+  if (state.preserveChatScrollOnRender) restoreChatScrollAfterRender();
+  else if (state.query.trim()) scrollChatSearchMatch();
   else scrollChatToBottom();
 }
 
@@ -337,6 +338,22 @@ function refreshChatFeed() {
   else scrollChatToBottom();
 }
 
+function rememberChatScrollForRender() {
+  const feed = document.querySelector(".chat-message-feed");
+  state.preservedChatScrollTop = feed ? feed.scrollTop : 0;
+  state.preserveChatScrollOnRender = true;
+}
+
+function restoreChatScrollAfterRender() {
+  const top = state.preservedChatScrollTop || 0;
+  state.preserveChatScrollOnRender = false;
+  state.preservedChatScrollTop = 0;
+  requestAnimationFrame(() => {
+    const feed = document.querySelector(".chat-message-feed");
+    if (feed) feed.scrollTop = top;
+  });
+}
+
 function refreshChatSearchControls() {
   const controls = document.querySelector(".chat-search-controls");
   if (controls) controls.outerHTML = renderChatSearchControls();
@@ -449,7 +466,6 @@ function renderLogin() {
 }
 
 function renderLoginUser(user) {
-  const needsPassword = isAdminUser(user);
   const selected = state.pendingAdminLoginUserId === user.id;
   return `
     <button class="login-user" type="button" data-login-user="${user.id}">
@@ -457,12 +473,12 @@ function renderLoginUser(user) {
         <strong>${escapeDisplay(user.name)}</strong>
         <small>${escapeDisplay(user.branch || "본점")} · ${escapeDisplay(user.role)}</small>
       </span>
-      <em>${needsPassword ? "확인" : "시작"}</em>
+      <em>로그인</em>
     </button>
-    ${needsPassword && selected ? `
+    ${selected ? `
       <form class="admin-login-form" id="adminLoginForm">
         <input type="hidden" name="userId" value="${escapeHtml(user.id)}">
-        <label>관리자 비밀번호
+        <label>비밀번호
           <input name="password" type="password" inputmode="numeric" autocomplete="current-password" placeholder="비밀번호 입력" required autofocus>
         </label>
         ${state.adminLoginError ? `<p class="form-error">${escapeHtml(state.adminLoginError)}</p>` : ""}
@@ -496,7 +512,7 @@ async function submitAdminLogin(form) {
   const userId = String(formData.get("userId") || "");
   const password = String(formData.get("password") || "");
   try {
-    await api("/api/auth/admin-login", {
+    await api("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ userId, password }),
     });
@@ -519,7 +535,7 @@ async function submitAdminPasswordChange(form) {
     return;
   }
   try {
-    await api("/api/auth/admin-password", {
+    await api("/api/auth/password", {
       method: "POST",
       body: JSON.stringify({ currentPassword, newPassword }),
     });

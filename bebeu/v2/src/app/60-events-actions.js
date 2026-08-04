@@ -48,14 +48,11 @@
 
   if (target.dataset.loginUser) {
     const user = state.data.users.find((item) => item.id === target.dataset.loginUser);
-    if (isAdminUser(user)) {
-      state.pendingAdminLoginUserId = user.id;
-      state.adminLoginError = "";
-      render();
-      requestAnimationFrame(() => document.querySelector("#adminLoginForm input[name='password']")?.focus());
-      return;
-    }
-    loginAsUser(target.dataset.loginUser);
+    if (!user) return;
+    state.pendingAdminLoginUserId = user.id;
+    state.adminLoginError = "";
+    render();
+    requestAnimationFrame(() => document.querySelector("#adminLoginForm input[name='password']")?.focus());
     return;
   }
 
@@ -95,6 +92,7 @@
   }
 
   if (target.dataset.chatAttachment) {
+    rememberChatScrollForRender();
     state.chatExpandedAttachmentId = target.dataset.chatAttachment;
     resetLightboxZoom();
     render();
@@ -584,6 +582,10 @@
     requestAnimationFrame(() => document.querySelector("#adminPasswordForm input[name='currentPassword']")?.focus());
     return;
   }
+  if (target.dataset.deleteMember) {
+    await deleteMember(target.dataset.deleteMember);
+    return;
+  }
   if (target.id === "backToList") {
     state.selectedOrderId = null;
     state.smsTemplateSlots = {};
@@ -902,6 +904,56 @@ async function saveAdminMemos() {
   });
   await load();
   alert("관리자 메모를 저장했습니다.");
+}
+
+async function submitMemberManagement(form) {
+  if (!isAdminUser()) return;
+  const formData = new FormData(form);
+  const payload = {
+    name: String(formData.get("name") || "").trim(),
+    role: String(formData.get("role") || "직원"),
+    password: String(formData.get("password") || ""),
+  };
+  if (!payload.name) {
+    alert("멤버 이름을 입력해주세요.");
+    return;
+  }
+  if (payload.password && payload.password.length < 4) {
+    alert("비밀번호는 4자리 이상으로 입력해주세요.");
+    return;
+  }
+  try {
+    setGlobalLoading("멤버 추가 중...");
+    await waitForPaint();
+    const result = await api("/api/members", { method: "POST", body: JSON.stringify(payload) });
+    state.data.users = result.users || state.data.users;
+    form.reset();
+    render();
+    showToast("멤버가 추가되었습니다.");
+  } catch (error) {
+    alert(error.message || "멤버를 추가하지 못했습니다.");
+  } finally {
+    setGlobalLoading("");
+  }
+}
+
+async function deleteMember(userId) {
+  if (!isAdminUser()) return;
+  const member = state.data.users.find((item) => item.id === userId);
+  if (!member) return;
+  if (!confirm(`${member.name} 멤버를 삭제하시겠습니까?`)) return;
+  try {
+    setGlobalLoading("멤버 삭제 중...");
+    await waitForPaint();
+    const result = await api(`/api/members/${encodeURIComponent(userId)}`, { method: "DELETE" });
+    state.data.users = result.users || state.data.users;
+    render();
+    showToast("멤버가 삭제되었습니다.");
+  } catch (error) {
+    alert(error.message || "멤버를 삭제하지 못했습니다.");
+  } finally {
+    setGlobalLoading("");
+  }
 }
 
 function addChecklistRow() {
@@ -1465,6 +1517,7 @@ function navigateChatExpandedAttachment(direction) {
   if (index < 0) return false;
   const nextIndex = direction === "previous" ? index - 1 : index + 1;
   if (!attachments[nextIndex]) return false;
+  rememberChatScrollForRender();
   state.chatExpandedAttachmentId = attachments[nextIndex].id;
   resetLightboxZoom();
   render();
@@ -1602,6 +1655,7 @@ function handlePhotoTap(event) {
       return;
     }
     if (state.chatExpandedAttachmentId) {
+      rememberChatScrollForRender();
       state.chatExpandedAttachmentId = null;
       resetLightboxZoom();
       render();

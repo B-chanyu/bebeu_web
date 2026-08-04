@@ -3915,6 +3915,66 @@ body.is-photo-selection-mode .completed-photo-card {
   gap: 10px;
 }
 
+.member-management-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(110px, 0.55fr);
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.member-management-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.member-management-form label:nth-child(3),
+.member-management-form .primary-button {
+  grid-column: 1 / -1;
+}
+
+.member-list {
+  display: grid;
+  gap: 8px;
+}
+
+.member-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-soft);
+}
+
+.member-row strong,
+.member-row small {
+  display: block;
+}
+
+.member-row small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.member-row .danger-button {
+  min-height: 38px;
+}
+
+.member-row .danger-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .sheet {
   width: min(520px, calc(100vw - 22px));
   max-width: calc(100vw - 22px);

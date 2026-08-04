@@ -189,6 +189,11 @@ content.addEventListener("submit", async (event) => {
     await submitAdminPasswordChange(event.target);
     return;
   }
+  if (event.target.id === "memberManagementForm") {
+    event.preventDefault();
+    await submitMemberManagement(event.target);
+    return;
+  }
   if (event.target.id === "naverCafeSettingsForm") {
     event.preventDefault();
     await submitNaverCafeSettings(event.target);
@@ -358,6 +363,7 @@ document.querySelector("#refreshButton").addEventListener("click", async () => {
 
 window.addEventListener("popstate", (event) => {
   if (state.chatExpandedAttachmentId) {
+    rememberChatScrollForRender();
     state.chatExpandedAttachmentId = null;
     resetLightboxZoom();
     history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
