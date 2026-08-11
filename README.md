@@ -11,21 +11,21 @@
 진행 중인 품목을 날짜별로 확인하고, 접수부터 배송까지 단계 상태를 바로 변경할 수 있습니다.  
 중요 메모, 오늘 할 일, 부속품 메모를 카드 안에서 함께 확인해 작업자가 사진을 보며 체크할 수 있도록 구성했습니다.
 
-![진행 중 목록](docs/images/progress-list.png)
+<img src="docs/images/progress-list.png" alt="진행 중 목록" width="50%">
 
 ### 완료 목록
 
 완료된 품목은 완료, 문자완료, 내보내기완료 상태로 관리합니다.  
 배송전, 링크전송, 배송완료 또는 픽업전, 링크전송 버튼을 통해 고객 공유 흐름을 빠르게 처리할 수 있습니다.
 
-![완료 목록](docs/images/completed-list.png)
+<img src="docs/images/completed-list.png" alt="완료 목록" width="50%">
 
 ### 채팅 및 사진 공유
 
 채팅방에서는 작업자들이 사진과 메시지를 공유할 수 있고, 업로드된 사진을 품목 단계로 바로 등록할 수 있습니다.  
 현장 사진을 카카오톡처럼 시간순으로 확인하면서 필요한 품목으로 연결하는 흐름을 지원합니다.
 
-![채팅 사진 공유](docs/images/chat-photo-room.png)
+<img src="docs/images/chat-photo-room.png" alt="채팅 사진 공유" width="50%">
 
 ## 주요 기능
 
