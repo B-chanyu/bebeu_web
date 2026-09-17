@@ -28,6 +28,7 @@ orderForm.addEventListener("submit", async (event) => {
     const products = readProductDetails();
     const firstProduct = products.find((item) => item.brand || item.modelName) || {};
     payload.serial = serialForOrderType(payload.serial);
+    payload.registrationDate = registrationDateFromSerialOrRange(payload.serial, dateRange) || null;
     payload.phone = null;
     payload.productType = getProductTypes().join(", ");
     payload.brand = firstProduct.brand || payload.brand || null;
@@ -229,6 +230,17 @@ content.addEventListener("submit", async (event) => {
 });
 
 content.addEventListener("input", (event) => {
+  if (event.target.id === "deliveryAddressInput") {
+    localStorage.setItem(DELIVERY_ADDRESS_STORAGE_KEY, event.target.value);
+    state.deliveryRoute = [];
+    state.deliveryRouteOrigin = null;
+    state.deliveryRouteMessage = "";
+  }
+  if (event.target.id === "deliveryOrderSearchInput") {
+    state.deliveryOrderQuery = event.target.value;
+    refreshDeliveryOrderPicker();
+    return;
+  }
   if (event.target.id === "searchInput") {
     state.query = event.target.value;
     if (state.tab === "chat") {
@@ -339,11 +351,15 @@ document.addEventListener("keydown", async (event) => {
   }
 });
 document.addEventListener("pointerdown", handleDoneOrderPointerDown);
+document.addEventListener("pointerdown", handleDeliveryRoutePointerDown, { passive: false });
 document.addEventListener("pointerup", handleDoneOrderPointerEnd);
+document.addEventListener("pointerup", handleDeliveryRoutePointerEnd);
 document.addEventListener("pointercancel", handleDoneOrderPointerEnd);
+document.addEventListener("pointercancel", handleDeliveryRoutePointerEnd);
 document.addEventListener("pointerdown", handlePhotoPointerDown, { passive: false });
 document.addEventListener("pointerdown", handleLightboxPointerDown);
 document.addEventListener("pointermove", handlePhotoPointerMove, { passive: false });
+document.addEventListener("pointermove", handleDeliveryRoutePointerMove, { passive: false });
 document.addEventListener("pointermove", handleLightboxPointerMove);
 document.addEventListener("touchmove", handlePhotoSelectionTouchMove, { passive: false });
 document.addEventListener("pointerup", handlePhotoPointerEnd);
@@ -424,7 +440,7 @@ window.addEventListener("popstate", (event) => {
   }
 });
 
-if ("serviceWorker" in navigator) {
+if (!isNativeApp() && "serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").then((reg) => {
     navigator.serviceWorker.addEventListener("message", (event) => {
       if (event.data?.type === "open-chat-receipt") openReceiptChatFromNotification();
@@ -444,6 +460,33 @@ if ("serviceWorker" in navigator) {
   }).catch(() => {});
 }
 
+let currentRuntimeVersion = "";
+let runtimeReloadStarted = false;
+
+async function pollRuntimeVersion() {
+  if (runtimeReloadStarted || document.visibilityState === "hidden") return;
+  try {
+    const response = await fetch(serverUrl(`/api/runtime-version?t=${Date.now()}`), { cache: "no-store" });
+    if (!response.ok) return;
+    const payload = await response.json();
+    const nextVersion = String(payload?.version || "");
+    if (!nextVersion) return;
+    if (!currentRuntimeVersion) {
+      currentRuntimeVersion = nextVersion;
+      return;
+    }
+    if (currentRuntimeVersion === nextVersion) return;
+    runtimeReloadStarted = true;
+    const registration = "serviceWorker" in navigator
+      ? await navigator.serviceWorker.getRegistration().catch(() => null)
+      : null;
+    await registration?.update().catch(() => {});
+    window.location.reload();
+  } catch {}
+}
+
+pollRuntimeVersion();
+setInterval(pollRuntimeVersion, 3000);
 setInterval(pollChatMessages, CHAT_POLL_INTERVAL_MS);
 
 load().catch((error) => {

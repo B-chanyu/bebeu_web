@@ -157,6 +157,7 @@ function orderRegistrationDateValue(order) {
 function orderListType(order) {
   const rawSerial = String(order.serial || "").trim().toUpperCase();
   const serial = findSerial(rawSerial) || rawSerial;
+  if (isDateSerial(serial)) return "date";
   if (serial.startsWith("AB")) return "AB";
   if (serial.startsWith("BA")) return "BA";
   if (serial.startsWith("A")) return "A";

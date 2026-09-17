@@ -195,21 +195,9 @@ function renderNaverCafeSetting() {
           <input name="enabled" type="checkbox" ${settings.enabled ? "checked" : ""}>
           카페 업로드 기능 사용
         </label>
-        <div class="naver-cafe-grid">
-          <label>Client ID
-            <input name="clientId" type="text" autocomplete="off" value="${escapeHtml(settings.clientId || "")}">
-          </label>
-          <label>Client Secret
-            <input name="clientSecret" type="password" autocomplete="off" placeholder="${settings.hasClientSecret ? "저장된 Secret 유지" : "Client Secret"}">
-          </label>
-        </div>
-        <div class="naver-cafe-grid">
-          <label>카페 ID
-            <input name="clubId" type="text" inputmode="numeric" autocomplete="off" value="${escapeHtml(settings.clubId || "")}" placeholder="clubid">
-          </label>
-          <label>게시판 ID
-            <input name="menuId" type="text" inputmode="numeric" autocomplete="off" value="${escapeHtml(settings.menuId || "")}" placeholder="menuid">
-          </label>
+        <div class="api-managed-status">
+          <span>카페 API</span>
+          <strong>${settings.hasClientId && settings.hasClientSecret && settings.hasClubId && settings.hasMenuId ? "서버 설정 완료" : "서버 설정 필요"}</strong>
         </div>
         <a class="primary-button naver-connect-button" href="${escapeHtml(settings.connectPath || "/api/naver-cafe/connect")}">네이버 계정 연결</a>
         <button class="secondary-button" type="button" data-naver-cafe-automation-login>자동화 로그인 열기</button>
@@ -449,6 +437,7 @@ function renderMemberManagementSetting() {
         <label>권한
           <select name="role">
             <option value="직원">직원</option>
+            <option value="배송전용">배송전용</option>
             <option value="관리자">관리자</option>
           </select>
         </label>
@@ -466,7 +455,7 @@ function renderMemberManagementSetting() {
             <article class="member-row">
               <div>
                 <strong>${escapeHtml(member.name)}</strong>
-                <small>${isAdminUser(member) ? "관리자" : "직원"} · ${escapeHtml(member.branch || "본점")}</small>
+                <small>${isAdminUser(member) ? "관리자" : isDeliveryOnlyUser(member) ? "배송전용" : "직원"} · ${escapeHtml(member.branch || "본점")}</small>
               </div>
               <button class="danger-button compact" type="button" data-delete-member="${escapeHtml(member.id)}" ${locked ? "disabled" : ""}>
                 삭제
@@ -488,6 +477,7 @@ function renderAppInstallSetting() {
   const installed = isStandaloneApp();
   const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent);
   const secure = window.isSecureContext;
+  const deliveryOn = state.deliveryTabEnabled;
   let message = "휴대폰의 홈 화면에 설치하면 전체 화면으로 빠르게 실행할 수 있습니다.";
   let action = `<button class="primary-button" type="button" id="installAppButton">앱으로 설치</button>`;
 
@@ -510,7 +500,29 @@ function renderAppInstallSetting() {
       </div>
       <p class="helper">${message}</p>
       ${action}
+      <div class="delivery-tab-setting">
+        <div>
+          <strong>배송 동선 탭</strong>
+          <p class="helper">ON일 때만 하단 메뉴에 배송 탭이 추가됩니다.</p>
+        </div>
+        <div class="delivery-toggle-row" role="group" aria-label="배송 탭 표시">
+          <button class="delivery-toggle-button ${deliveryOn ? "is-active" : ""}" type="button" data-delivery-tab-toggle="on">ON</button>
+          <button class="delivery-toggle-button ${deliveryOn ? "" : "is-active"}" type="button" data-delivery-tab-toggle="off">OFF</button>
+        </div>
+      </div>
+      ${deliveryOn ? `<button class="secondary-button" type="button" data-tab="delivery">배송 동선 열기</button>` : ""}
+      ${isAdminUser() ? renderMapSetting() : ""}
     </section>
+  `;
+}
+
+function renderMapSetting() {
+  const settings = state.data?.mapSettings || {};
+  return `
+    <div class="api-managed-status">
+      <span>네이버 지도 API</span>
+      <strong>${settings.naverMapsEnabled ? "서버 설정 완료" : "서버 설정 필요"}</strong>
+    </div>
   `;
 }
 

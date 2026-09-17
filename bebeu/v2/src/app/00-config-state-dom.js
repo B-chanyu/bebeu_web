@@ -2,6 +2,8 @@ const ORDER_DEFAULT_DAYS = 5;
 const DEFAULT_DATE_RANGE = defaultDateRange();
 const VIEW_STATE_KEY = "bebeu.viewState";
 const RESTORABLE_VIEW_KEYS = ["tab", "selectedOrderId", "selectedStep", "filter", "listTypeFilter", "toolbarCollapsed", "dateStart", "dateEnd", "doneDateStart", "doneDateEnd", "workDateSort", "doneDateSort", "query"];
+const DELIVERY_ADDRESS_STORAGE_KEY = "bebeu.deliveryAddresses";
+const DELIVERY_TAB_ENABLED_KEY = "bebeu.deliveryTabEnabled";
 const PHOTO_STEP_LIMIT = 9;
 const WORKFLOW_STEPS = [
   { code: "01", label: "접수" },
@@ -49,13 +51,15 @@ const CHAT_COMPOSER_STEPS = [
 const LIST_TYPE_FILTERS = [
   { code: "A", label: "A" },
   { code: "B", label: "B" },
+  { code: "date", label: "날짜" },
   { code: "today", label: "오늘할일" },
 ];
 const appFontSizeRules = [];
 let appFontSizesCaptured = false;
 let deferredInstallPrompt = null;
 const APP_SERVER_KEY = "bebeu.nativeServerUrl";
-const CUSTOMER_SHARE_CACHE_VERSION = "305";
+const DEFAULT_NATIVE_SERVER_URL = "https://app.bebeu.cloud";
+const CUSTOMER_SHARE_CACHE_VERSION = "320";
 
 const state = {
   tab: "me",
@@ -113,6 +117,16 @@ const state = {
   toastTimer: null,
   keepEditingId: null,
   keepEditingType: "text",
+  deliveryLocation: null,
+  deliveryRoute: [],
+  deliveryRouteOrigin: null,
+  deliveryRouteMessage: "",
+  deliveryMapMessage: "",
+  deliveryOrderPickerOpen: false,
+  selectedDeliveryOrderIds: [],
+  deliveryOrderQuery: "",
+  deliveryTabEnabled: localStorage.getItem(DELIVERY_TAB_ENABLED_KEY) === "1",
+  deliveryAutoLocateRequested: false,
   attendancePayrollUserId: null,
   attendanceEditDay: null,
   trashSelectedPhotoIds: [],
@@ -147,7 +161,7 @@ function isNativeApp() {
 
 function configuredServerBase() {
   if (!isNativeApp()) return window.location.origin;
-  return String(localStorage.getItem(APP_SERVER_KEY) || "").trim().replace(/\/$/, "");
+  return String(localStorage.getItem(APP_SERVER_KEY) || DEFAULT_NATIVE_SERVER_URL).trim().replace(/\/$/, "");
 }
 
 function normalizeNativeServerBase(value) {

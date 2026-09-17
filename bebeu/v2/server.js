@@ -2,8 +2,12 @@ const http = require("http");
 const fs = require("fs");
 const fsp = fs.promises;
 const path = require("path");
+for (const envPath of [path.join(__dirname, ".env"), path.join(__dirname, "..", "..", ".env")]) {
+  if (fs.existsSync(envPath)) process.loadEnvFile(envPath);
+}
 const { execFileSync } = require("child_process");
 const { createHash, randomUUID } = require("crypto");
+const { gzipSync } = require("zlib");
 const iconv = require("iconv-lite");
 
 let sharp = null;
@@ -55,8 +59,8 @@ const NAVER_CAFE_API_BASE = "https://openapi.naver.com/v1/cafe";
 const NAVER_AUTH_BASE = "https://nid.naver.com/oauth2.0";
 const NAVER_DEFAULT_CLIENT_ID = process.env.NAVER_CLIENT_ID || "";
 const NAVER_DEFAULT_CLIENT_SECRET = process.env.NAVER_CLIENT_SECRET || "";
-const NAVER_DEFAULT_CAFE_CLUB_ID = process.env.NAVER_CAFE_CLUB_ID || "";
-const NAVER_DEFAULT_CAFE_MENU_ID = process.env.NAVER_CAFE_MENU_ID || "";
+const NAVER_DEFAULT_CAFE_CLUB_ID = process.env.NAVER_CAFE_CLUB_ID || "31686098";
+const NAVER_DEFAULT_CAFE_MENU_ID = process.env.NAVER_CAFE_MENU_ID || "2";
 const NAVER_CAFE_MAX_ATTACHMENTS = Math.max(1, Number(process.env.NAVER_CAFE_MAX_ATTACHMENTS || 20));
 const NAVER_CAFE_RETRY_ATTACHMENTS = Math.max(1, Number(process.env.NAVER_CAFE_RETRY_ATTACHMENTS || 5));
 const NAVER_CAFE_IMAGE_MAX_WIDTH = Math.max(800, Number(process.env.NAVER_CAFE_IMAGE_MAX_WIDTH || 1600));
@@ -67,6 +71,9 @@ const BEBEU_STORE_ADDRESS = "전남광주 광산구 첨단내촌로57번길 6 1�
 const BEBEU_NAVER_MAP_URL = "https://map.naver.com/p/search/%EC%A0%84%EB%82%A8%EA%B4%91%EC%A3%BC%20%EA%B4%91%EC%82%B0%EA%B5%AC%20%EC%B2%A8%EB%8B%A8%EB%82%B4%EC%B4%8C%EB%A1%9C57%EB%B2%88%EA%B8%B8%206%201%EC%B8%B5";
 const BEBEU_NAVER_PLACE_URL = "https://map.naver.com/p/entry/place/2065853195?c=15.00,0,0,0,dh&placePath=%2Fhome%3Ffrom%3Dmap%26fromPanelNum%3D1%26additionalHeight%3D76%26timestamp%3D202607160120%26locale%3Dko%26svcName%3Dmap_pcv5";
 const BEBEU_NAVER_PLACE_QUERY = "베베유 전남광주 광산구 첨단내촌로57번길 6";
+const NAVER_MAPS_CLIENT_ID = process.env.NAVER_MAPS_CLIENT_ID || process.env.NAVER_MAP_CLIENT_ID || "";
+const NAVER_MAPS_CLIENT_SECRET = process.env.NAVER_MAPS_CLIENT_SECRET || process.env.NAVER_MAP_CLIENT_SECRET || "";
+const BEBEU_RUNTIME_VERSION = process.env.BEBEU_RUNTIME_VERSION || `${Date.now()}-${process.pid}`;
 const UPLOAD_LIMIT_BYTES = Number(process.env.UPLOAD_LIMIT_MB || 600) * 1024 * 1024;
 const APP_ALLOWED_ORIGINS = new Set(
   String(process.env.APP_ALLOWED_ORIGINS || "https://localhost,capacitor://localhost")
@@ -80,8 +87,10 @@ let mariaDbColumnsPromise = null;
 let serverLogsTableReady = false;
 let serverLogPersisting = false;
 let dbCache = null;
+let trashSummaryCache = null;
 const photoPathCache = new Map();
 const mysqlPools = new Map();
+const deliveryLocationStreams = new Set();
 let naverCafeAutomationContext = null;
 
 class AppError extends Error {
@@ -288,6 +297,7 @@ function applyAppCors(req, res) {
 
 function invalidateDbCache() {
   dbCache = null;
+  trashSummaryCache = null;
   photoPathCache.clear();
 }
 
@@ -364,6 +374,7 @@ function createSeedDb() {
       { id: "staff-yunju", name: "윤주", role: "직원", branch: "본점", clockedIn: false, clockInAt: null },
       { id: "staff-danbi", name: "단비", role: "직원", branch: "본점", clockedIn: false, clockInAt: null },
       { id: "staff-chanyu", name: "찬유", role: "직원", branch: "본점", clockedIn: false, clockInAt: null },
+      { id: "delivery-route", name: "배송", role: "배송전용", branch: "본점", clockedIn: false, clockInAt: null },
     ],
     activeUserId: "admin-sunmi",
     adminMemos: defaultMemos(),
@@ -744,10 +755,15 @@ function passwordMatches(storedHash, input, role = "") {
 
 const ADMIN_ROLE_LABEL = "관리자";
 const STAFF_ROLE_LABEL = "직원";
-const LEGACY_ADMIN_ROLE_LABEL = "愿由ъ옄";
+const DELIVERY_ROLE_LABEL = "배송전용";
+const LEGACY_ADMIN_ROLE_LABEL = "\u613f\u0080\u7531\u044a\uc604";
 
 function isAdminRoleValue(role) {
   return role === ADMIN_ROLE_LABEL || role === LEGACY_ADMIN_ROLE_LABEL;
+}
+
+function isDeliveryRoleValue(role) {
+  return role === DELIVERY_ROLE_LABEL || role === "배송";
 }
 
 function parseJsonField(value, fallback) {
@@ -762,10 +778,10 @@ function naverCafeSettingsForClient(settings = {}) {
   const merged = { ...defaultNaverCafeSettings(), ...(settings || {}) };
   return {
     enabled: Boolean(merged.enabled),
-    clientId: merged.clientId || "",
+    hasClientId: Boolean(merged.clientId),
     hasClientSecret: Boolean(merged.clientSecret),
-    clubId: merged.clubId || "",
-    menuId: merged.menuId || "",
+    hasClubId: Boolean(merged.clubId),
+    hasMenuId: Boolean(merged.menuId),
     titleTemplate: merged.titleTemplate || defaultNaverCafeSettings().titleTemplate,
     contentTemplate: merged.contentTemplate || defaultNaverCafeSettings().contentTemplate,
     includePhotos: merged.includePhotos || "all",
@@ -776,6 +792,550 @@ function naverCafeSettingsForClient(settings = {}) {
     accessTokenPreview: merged.accessToken ? `${String(merged.accessToken).slice(0, 5)}...저장됨` : "",
     connectPath: "/api/naver-cafe/connect",
     automationLoginPath: "/api/naver-cafe/automation-login",
+  };
+}
+
+function mapSettingsForClient(settings = {}) {
+  const naverMapsClientId = String(NAVER_MAPS_CLIENT_ID || settings.naverMapsClientId || "").trim();
+  return {
+    naverMapsEnabled: Boolean(naverMapsClientId),
+  };
+}
+
+function deliveryLocationForClient(location = null) {
+  if (!location || typeof location !== "object") return null;
+  const latitude = Number(location.latitude);
+  const longitude = Number(location.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  return {
+    userId: String(location.userId || ""),
+    userName: String(location.userName || "배송"),
+    latitude,
+    longitude,
+    accuracy: Number(location.accuracy) || 0,
+    updatedAt: toIso(location.updatedAt) || new Date().toISOString(),
+  };
+}
+
+function writeDeliveryLocationStream(res, location) {
+  if (res.destroyed || res.writableEnded) return false;
+  try {
+    res.write(`event: location\ndata: ${JSON.stringify({ deliveryLocation: deliveryLocationForClient(location) })}\n\n`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function broadcastDeliveryLocation(location) {
+  for (const res of deliveryLocationStreams) {
+    if (!writeDeliveryLocationStream(res, location)) deliveryLocationStreams.delete(res);
+  }
+}
+
+const DELIVERY_JOB_READY = "배송 전";
+const DELIVERY_JOB_COMPLETED = "배송 완료";
+
+function normalizeDeliveryJobs(value = [], orders = []) {
+  const source = Array.isArray(value) ? value : [];
+  const orderById = new Map((orders || []).map((order) => [String(order.id), order]));
+  const normalized = [];
+  const seen = new Set();
+  for (const item of source) {
+    const orderId = String(item?.orderId || item?.id || "").trim();
+    if (!orderId || seen.has(orderId)) continue;
+    const order = orderById.get(orderId);
+    const address = String(order?.address || item?.address || "").trim();
+    if (!address) continue;
+    seen.add(orderId);
+    const status = item?.status === DELIVERY_JOB_COMPLETED ? DELIVERY_JOB_COMPLETED : DELIVERY_JOB_READY;
+    normalized.push({
+      orderId,
+      serial: String(order?.serial || item?.serial || "").trim(),
+      customerName: String(order?.customerName || item?.customerName || "").trim(),
+      phone: String(order?.phone || item?.phone || "").trim(),
+      address,
+      status,
+      routeOrder: Number.isFinite(Number(item?.routeOrder)) ? Math.max(1, Math.round(Number(item.routeOrder))) : null,
+      addedAt: toIso(item?.addedAt) || new Date().toISOString(),
+      addedBy: String(item?.addedBy || "").trim(),
+      plannedAt: toIso(item?.plannedAt),
+      completedAt: status === DELIVERY_JOB_COMPLETED ? toIso(item?.completedAt) : null,
+      completedBy: status === DELIVERY_JOB_COMPLETED ? String(item?.completedBy || "").trim() : "",
+      updatedAt: toIso(item?.updatedAt) || toIso(item?.addedAt) || new Date().toISOString(),
+    });
+  }
+  return normalized.sort((a, b) => {
+    if (a.status !== b.status) return a.status === DELIVERY_JOB_READY ? -1 : 1;
+    if (a.status === DELIVERY_JOB_READY && a.routeOrder !== b.routeOrder) {
+      if (a.routeOrder === null) return 1;
+      if (b.routeOrder === null) return -1;
+      return a.routeOrder - b.routeOrder;
+    }
+    return new Date(b.updatedAt) - new Date(a.updatedAt);
+  });
+}
+
+function deliveryJobFromOrder(order, userName = "", previous = null) {
+  const now = new Date().toISOString();
+  return {
+    orderId: order.id,
+    serial: order.serial || "",
+    customerName: order.customerName || "",
+    phone: order.phone || "",
+    address: order.address || "",
+    status: DELIVERY_JOB_READY,
+    routeOrder: null,
+    addedAt: previous?.addedAt || now,
+    addedBy: previous?.addedBy || userName,
+    plannedAt: null,
+    completedAt: null,
+    completedBy: "",
+    updatedAt: now,
+  };
+}
+
+function naverMapsHeaders() {
+  return {
+    "X-NCP-APIGW-API-KEY-ID": NAVER_MAPS_CLIENT_ID,
+    "X-NCP-APIGW-API-KEY": NAVER_MAPS_CLIENT_SECRET,
+    Accept: "application/json",
+  };
+}
+
+function uniqueTextValues(values = []) {
+  return [...new Set(values.map((value) => String(value || "").replace(/\s+/g, " ").trim()).filter(Boolean))];
+}
+
+function cleanDeliveryAddressCandidate(value) {
+  return String(value || "")
+    .replace(/\b(?:19|20)?\d{2}[.\-/년]\s*\d{1,2}(?:[.\-/월]\s*\d{1,2}일?)?\b/gu, " ")
+    .replace(/\b\d{6}\b/gu, " ")
+    .replace(/(?:오전|오후)\s*\d{1,2}(?::\d{1,2})?/gu, " ")
+    .replace(/\b\d{2,4}[-.)]\d{3,4}[-.]\d{4}\b/gu, " ")
+    .replace(/^(?:주소|배송지|도착지)\s*[:：-]?\s*/u, "")
+    .replace(/[<>\[\]{}]/gu, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s,./|:;-]+|[\s,./|:;-]+$/gu, "")
+    .trim();
+}
+
+function stripDeliveryUnitDetails(value) {
+  return cleanDeliveryAddressCandidate(value)
+    .replace(/\s+\d{1,4}\s*동\s*(?:\d{1,4}\s*호)?(?:\s.*)?$/u, "")
+    .replace(/\s+\d{1,4}\s*호(?:\s.*)?$/u, "")
+    .replace(/\s+(?:지하\s*)?\d+\s*층(?:\s.*)?$/u, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function deliveryAddressMatchTokens(value) {
+  const ignored = new Set(["광주", "광주광역시", "전남광주통합특별시", "전라남도", "전남", "주소", "배송지", "도착지"]);
+  return uniqueTextValues(
+    stripDeliveryUnitDetails(value)
+      .split(/[\s,./|:;()\[\]{}<>-]+/u)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 2 && !ignored.has(token) && !/^\d+$/u.test(token)),
+  );
+}
+
+function matchingKnownDeliveryAddresses(address, knownAddresses = []) {
+  const query = stripDeliveryUnitDetails(address);
+  const queryCompact = query.replace(/\s+/g, "");
+  const tokens = deliveryAddressMatchTokens(query);
+  if (!query || !tokens.length) return [];
+  return uniqueTextValues(knownAddresses)
+    .map((knownAddress) => {
+      const cleaned = cleanDeliveryAddressCandidate(knownAddress);
+      const compact = cleaned.replace(/\s+/g, "");
+      const matched = tokens.filter((token) => compact.includes(token.replace(/\s+/g, "")));
+      const score = (compact.includes(queryCompact) ? 1000 : 0)
+        + matched.reduce((sum, token) => sum + token.length * 10, 0);
+      return { cleaned, matchedCount: matched.length, score };
+    })
+    .filter((item) => item.cleaned && item.matchedCount >= Math.min(2, tokens.length))
+    .sort((a, b) => b.score - a.score || a.cleaned.length - b.cleaned.length)
+    .slice(0, 5)
+    .map((item) => item.cleaned);
+}
+
+function hasExplicitDeliveryRegion(value) {
+  const text = String(value || "").trim();
+  return /^(?:서울(?:특별시)?|부산(?:광역시)?|대구(?:광역시)?|인천(?:광역시)?|광주(?:광역시)?|대전(?:광역시)?|울산(?:광역시)?|세종(?:특별자치시)?|경기(?:도)?|강원(?:특별자치도|도)?|충북|충남|전북|전남|경북|경남|제주(?:특별자치도|도)?|전라북도|전라남도|충청북도|충청남도|경상북도|경상남도|[가-힣]+(?:시|군))(?:\s|$)/u.test(text);
+}
+
+function isGwangjuDeliveryAddress(value) {
+  return /(?:광주광역시|전남광주통합특별시|(?:^|\s)광주(?:\s|$))/u.test(String(value || ""));
+}
+
+function deliveryAddressSearchCandidates(address, knownAddresses = []) {
+  const raw = String(address || "").trim();
+  if (!raw) return [];
+  const labeled = raw.match(/(?:주소|배송지|도착지)\s*[:：-]?\s*([^/|;]+)/u)?.[1] || "";
+  const roadMatches = [...raw.matchAll(/(?:전남광주통합특별시|광주광역시|광주|전라남도|전남)?\s*(?:[가-힣0-9·.-]+(?:시|군|구)\s+)?[가-힣0-9·.-]+(?:대로|로|길)\s*\d+(?:-\d+)?(?:\s+\d+층)?/gu)].map((match) => match[0]);
+  const lotMatches = [...raw.matchAll(/(?:전남광주통합특별시|광주광역시|광주|전라남도|전남)?\s*(?:[가-힣0-9·.-]+(?:시|군|구)\s+)?[가-힣0-9·.-]+(?:읍|면|동|리)\s+\d+(?:-\d+)?/gu)].map((match) => match[0]);
+  const segments = raw
+    .split(/[\/|;,()\[\]{}<>]+/u)
+    .map(cleanDeliveryAddressCandidate)
+    .filter((value) => /(?:대로|로|길|읍|면|동|리|번지|아파트|빌라|주택|\d+-\d+)/u.test(value));
+  const bases = uniqueTextValues([
+    ...matchingKnownDeliveryAddresses(raw, knownAddresses),
+    ...roadMatches,
+    ...lotMatches,
+    labeled,
+    ...segments,
+    stripDeliveryUnitDetails(raw),
+    cleanDeliveryAddressCandidate(raw),
+  ]).filter((value) => value.length >= 2);
+  return uniqueTextValues(bases.flatMap((value) => {
+    if (hasExplicitDeliveryRegion(value)) return [value];
+    return [`광주광역시 ${value}`, `광주 ${value}`, `전남광주통합특별시 ${value}`, value];
+  }));
+}
+
+function cleanNaverLocalText(value) {
+  return String(value || "")
+    .replace(/<[^>]*>/gu, "")
+    .replace(/&amp;/gu, "&")
+    .replace(/&lt;/gu, "<")
+    .replace(/&gt;/gu, ">")
+    .replace(/&quot;/gu, '"')
+    .replace(/&#39;/gu, "'")
+    .trim();
+}
+
+function naverLocalCoordinate(value, limit) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return NaN;
+  return Math.abs(number) > limit ? number / 10000000 : number;
+}
+
+async function searchNaverLocalLocation(address, credentials = {}) {
+  const query = String(address || "").trim();
+  const clientId = String(credentials.clientId || process.env.NAVER_SEARCH_CLIENT_ID || NAVER_DEFAULT_CLIENT_ID || "").trim();
+  const clientSecret = String(credentials.clientSecret || process.env.NAVER_SEARCH_CLIENT_SECRET || NAVER_DEFAULT_CLIENT_SECRET || "").trim();
+  if (!query || !clientId || !clientSecret) return null;
+  const defaultToGwangju = !hasExplicitDeliveryRegion(query);
+  const keywords = defaultToGwangju ? [`광주광역시 ${query}`, `광주 ${query}`, query] : [query];
+  for (const keyword of uniqueTextValues(keywords)) {
+    const url = `https://openapi.naver.com/v1/search/local.json?query=${encodeURIComponent(keyword)}&display=5&start=1&sort=random`;
+    let response;
+    try {
+      response = await fetch(url, {
+        headers: {
+          "X-Naver-Client-Id": clientId,
+          "X-Naver-Client-Secret": clientSecret,
+          Accept: "application/json",
+        },
+      });
+    } catch {
+      continue;
+    }
+    if (!response.ok) continue;
+    const payload = await response.json().catch(() => ({}));
+    const item = (Array.isArray(payload.items) ? payload.items : []).find((candidate) => {
+      const longitude = naverLocalCoordinate(candidate.mapx, 180);
+      const latitude = naverLocalCoordinate(candidate.mapy, 90);
+      return Number.isFinite(longitude) && Number.isFinite(latitude);
+    });
+    if (!item) continue;
+    const resultAddress = `${item.roadAddress || ""} ${item.address || ""}`;
+    if (defaultToGwangju && !isGwangjuDeliveryAddress(resultAddress)) continue;
+    return {
+      address: query,
+      searchedText: keyword,
+      placeName: cleanNaverLocalText(item.title),
+      roadAddress: cleanNaverLocalText(item.roadAddress || item.address || query),
+      jibunAddress: cleanNaverLocalText(item.address || ""),
+      longitude: naverLocalCoordinate(item.mapx, 180),
+      latitude: naverLocalCoordinate(item.mapy, 90),
+    };
+  }
+  return null;
+}
+
+async function searchTopNaverLocation(address, options = {}) {
+  const query = String(address || "").trim();
+  if (!query) return null;
+  const defaultToGwangju = !hasExplicitDeliveryRegion(query);
+  const candidates = deliveryAddressSearchCandidates(query, options.knownAddresses);
+  for (const keyword of candidates) {
+    const url = `https://maps.apigw.ntruss.com/map-geocode/v2/geocode?query=${encodeURIComponent(keyword)}`;
+    const response = await fetch(url, { headers: naverMapsHeaders() });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new AppError(response.status, payload.errorMessage || payload.message || "주소 검색에 실패했습니다.");
+    }
+    const item = payload.addresses?.[0];
+    if (!item) continue;
+    if (defaultToGwangju && !isGwangjuDeliveryAddress(`${item.roadAddress || ""} ${item.jibunAddress || ""}`)) continue;
+    return {
+      address: query,
+      searchedText: keyword,
+      roadAddress: item.roadAddress || item.jibunAddress || query,
+      jibunAddress: item.jibunAddress || "",
+      longitude: Number(item.x),
+      latitude: Number(item.y),
+    };
+  }
+  return searchNaverLocalLocation(query, options.searchCredentials);
+}
+
+function haversineMeters(a, b) {
+  const radius = 6371000;
+  const toRad = (value) => Number(value) * Math.PI / 180;
+  const dLat = toRad(b.latitude - a.latitude);
+  const dLng = toRad(b.longitude - a.longitude);
+  const lat1 = toRad(a.latitude);
+  const lat2 = toRad(b.latitude);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 2 * radius * Math.asin(Math.sqrt(h));
+}
+
+async function naverDrivingSummary(start, goal) {
+  const startText = `${start.longitude},${start.latitude}`;
+  const goalText = `${goal.longitude},${goal.latitude}`;
+  const url = `https://maps.apigw.ntruss.com/map-direction/v1/driving?start=${encodeURIComponent(startText)}&goal=${encodeURIComponent(goalText)}&option=trafast`;
+  const response = await fetch(url, { headers: naverMapsHeaders() });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload.code) {
+    throw new AppError(response.status || 500, payload.message || payload.errorMessage || "네이버 주행 경로 계산에 실패했습니다.");
+  }
+  const route = payload.route?.trafast?.[0] || payload.route?.traoptimal?.[0] || Object.values(payload.route || {})[0]?.[0];
+  const summary = route?.summary || {};
+  return {
+    duration: Number(summary.duration) || Math.round(haversineMeters(start, goal) / 8 * 1000),
+    distance: Number(summary.distance) || Math.round(haversineMeters(start, goal)),
+    path: Array.isArray(route?.path)
+      ? route.path.map(([longitude, latitude]) => ({ longitude: Number(longitude), latitude: Number(latitude) })).filter((point) => Number.isFinite(point.latitude) && Number.isFinite(point.longitude))
+      : [],
+    guide: Array.isArray(route?.guide)
+      ? route.guide.map((item) => ({
+        pointIndex: Number(item.pointIndex) || 0,
+        type: Number(item.type) || 0,
+        instructions: String(item.instructions || "").trim(),
+        distance: Number(item.distance) || 0,
+        duration: Number(item.duration) || 0,
+      })).filter((item) => item.instructions)
+      : [],
+  };
+}
+
+function deliveryNeighborhoodName(point) {
+  const text = `${point.jibunAddress || ""} ${point.roadAddress || ""}`.replace(/\s+/g, " ").trim();
+  const tokens = text.split(" ").filter(Boolean);
+  let neighborhoodIndex = -1;
+  for (let index = tokens.length - 1; index >= 0; index -= 1) {
+    if (/^[가-힣0-9·]+(?:동|읍|면|리)$/u.test(tokens[index])) {
+      neighborhoodIndex = index;
+      break;
+    }
+  }
+  if (neighborhoodIndex < 0) return "";
+  let district = "";
+  for (let index = neighborhoodIndex - 1; index >= 0; index -= 1) {
+    if (/^[가-힣0-9·]+(?:시|군|구)$/u.test(tokens[index])) {
+      district = tokens[index];
+      break;
+    }
+  }
+  return [district, tokens[neighborhoodIndex]].filter(Boolean).join(" ");
+}
+
+function deliveryClusterCenter(points) {
+  const count = Math.max(points.length, 1);
+  return {
+    latitude: points.reduce((sum, point) => sum + Number(point.latitude), 0) / count,
+    longitude: points.reduce((sum, point) => sum + Number(point.longitude), 0) / count,
+  };
+}
+
+function clusterDeliveryPoints(points) {
+  const namedClusters = new Map();
+  const unnamed = [];
+  points.forEach((point) => {
+    const neighborhood = deliveryNeighborhoodName(point);
+    point.neighborhood = neighborhood;
+    if (!neighborhood) {
+      unnamed.push(point);
+      return;
+    }
+    if (!namedClusters.has(neighborhood)) namedClusters.set(neighborhood, []);
+    namedClusters.get(neighborhood).push(point);
+  });
+  const clusters = [...namedClusters.entries()].map(([name, items]) => ({ name, items }));
+  unnamed.forEach((point) => {
+    let nearestCluster = null;
+    let nearestDistance = Infinity;
+    clusters.forEach((cluster) => {
+      const distance = haversineMeters(point, deliveryClusterCenter(cluster.items));
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestCluster = cluster;
+      }
+    });
+    if (nearestCluster && nearestDistance <= 2200) {
+      nearestCluster.items.push(point);
+    } else {
+      clusters.push({ name: point.roadAddress || point.address, items: [point] });
+    }
+  });
+  return clusters;
+}
+
+function deliveryRouteSummaryLoader() {
+  const cache = new Map();
+  return async (start, goal) => {
+    const key = [start.longitude, start.latitude, goal.longitude, goal.latitude]
+      .map((value) => Number(value).toFixed(7))
+      .join(":");
+    if (!cache.has(key)) cache.set(key, naverDrivingSummary(start, goal));
+    return cache.get(key);
+  };
+}
+
+async function nearestDeliveryPoint(current, points, getSummary) {
+  let bestIndex = 0;
+  let bestSummary = null;
+  for (let index = 0; index < points.length; index += 1) {
+    const summary = await getSummary(current, points[index]);
+    if (!bestSummary || summary.duration < bestSummary.duration) {
+      bestIndex = index;
+      bestSummary = summary;
+    }
+  }
+  return { index: bestIndex, summary: bestSummary };
+}
+
+async function orderDeliveryStopsByNeighborhood(points, store, getSummary) {
+  const remainingClusters = clusterDeliveryPoints(points);
+  const ordered = [];
+  let current = null;
+  let preferredEntry = null;
+
+  while (remainingClusters.length) {
+    let clusterIndex = 0;
+    if (!current) {
+      let farthestDistance = -1;
+      remainingClusters.forEach((cluster, index) => {
+        const distance = haversineMeters(deliveryClusterCenter(cluster.items), store);
+        if (distance > farthestDistance) {
+          farthestDistance = distance;
+          clusterIndex = index;
+        }
+      });
+    } else {
+      let nearestTransition = null;
+      for (let index = 0; index < remainingClusters.length; index += 1) {
+        const candidate = await nearestDeliveryPoint(current, remainingClusters[index].items, getSummary);
+        if (!nearestTransition || candidate.summary.duration < nearestTransition.summary.duration) {
+          nearestTransition = { clusterIndex: index, pointIndex: candidate.index, summary: candidate.summary };
+        }
+      }
+      clusterIndex = nearestTransition.clusterIndex;
+      preferredEntry = remainingClusters[clusterIndex].items[nearestTransition.pointIndex];
+    }
+
+    const cluster = remainingClusters.splice(clusterIndex, 1)[0];
+    const pending = [...cluster.items];
+    if (!current) {
+      let firstIndex = 0;
+      let farthestFromOffice = -1;
+      pending.forEach((point, index) => {
+        const distance = haversineMeters(point, store);
+        if (distance > farthestFromOffice) {
+          farthestFromOffice = distance;
+          firstIndex = index;
+        }
+      });
+      current = pending.splice(firstIndex, 1)[0];
+    } else {
+      const entryIndex = Math.max(0, pending.indexOf(preferredEntry));
+      current = pending.splice(entryIndex, 1)[0];
+    }
+    ordered.push(current);
+    preferredEntry = null;
+
+    while (pending.length) {
+      const nearest = await nearestDeliveryPoint(current, pending, getSummary);
+      current = pending.splice(nearest.index, 1)[0];
+      ordered.push(current);
+    }
+  }
+  return ordered;
+}
+
+async function buildNaverDeliveryRoute({
+  addresses = [],
+  origin = null,
+  preserveOrder = false,
+  knownAddresses = [],
+  searchCredentials = {},
+}) {
+  if (!NAVER_MAPS_CLIENT_ID || !NAVER_MAPS_CLIENT_SECRET) {
+    throw new AppError(400, "네이버 지도 API 정보가 서버에 설정되지 않았습니다.");
+  }
+  if (!origin || !Number.isFinite(Number(origin.latitude)) || !Number.isFinite(Number(origin.longitude))) {
+    throw new AppError(400, "출발할 현재 위치를 확인하지 못했습니다. 위치 권한을 허용한 뒤 다시 시도해 주세요.");
+  }
+  const start = {
+    address: "현재 위치",
+    latitude: Number(origin.latitude),
+    longitude: Number(origin.longitude),
+    isOrigin: true,
+  };
+  const store = {
+    name: "베베유 사무실",
+    address: BEBEU_STORE_ADDRESS,
+    roadAddress: BEBEU_STORE_ADDRESS,
+    latitude: 35.220365,
+    longitude: 126.847487,
+    isStore: true,
+  };
+  const resolved = [];
+  const failed = [];
+  for (const address of addresses) {
+    const point = await searchTopNaverLocation(address, { knownAddresses, searchCredentials });
+    if (point && Number.isFinite(point.latitude) && Number.isFinite(point.longitude)) {
+      resolved.push(point);
+    } else {
+      failed.push(address);
+    }
+  }
+  if (!resolved.length) {
+    throw new AppError(400, "입력한 주소에서 배송 위치를 찾지 못했습니다. 동 또는 도로명과 건물번호를 함께 입력해 주세요.");
+  }
+  const getSummary = deliveryRouteSummaryLoader();
+  const orderedStops = preserveOrder
+    ? [...resolved]
+    : await orderDeliveryStopsByNeighborhood(resolved, store, getSummary);
+  const route = [];
+  let current = start;
+  for (const next of orderedStops) {
+    const bestSummary = await getSummary(current, next);
+    route.push({
+      ...next,
+      durationFromPrevious: bestSummary.duration,
+      distanceFromPrevious: bestSummary.distance,
+      pathFromPrevious: bestSummary.path,
+      guideFromPrevious: bestSummary.guide,
+    });
+    current = next;
+  }
+  const storeSummary = await getSummary(current, store);
+  route.push({
+    ...store,
+    durationFromPrevious: storeSummary.duration,
+    distanceFromPrevious: storeSummary.distance,
+    pathFromPrevious: storeSummary.path,
+    guideFromPrevious: storeSummary.guide,
+  });
+  return {
+    origin: start,
+    route,
+    failed,
+    totalDuration: route.reduce((sum, item) => sum + (Number(item.durationFromPrevious) || 0), 0),
+    totalDistance: route.reduce((sum, item) => sum + (Number(item.distanceFromPrevious) || 0), 0),
   };
 }
 
@@ -1064,7 +1624,7 @@ async function readMariaDb() {
     await ensureMariaDbColumns();
     await cleanupExpiredChatMessages();
     await cleanupExpiredTrashPhotos();
-    const users = (await mysqlQuery("SELECT users_idx,users_name,users_role,COALESCE((SELECT branches_name FROM branches WHERE branches.branches_idx = users.users_branch_idx),'본점'),users_clocked_in,users_clock_in_at FROM users WHERE COALESCE(users_is_active,1)=1 ORDER BY users_created_at,users_idx"))
+    let users = (await mysqlQuery("SELECT users_idx,users_name,users_role,COALESCE((SELECT branches_name FROM branches WHERE branches.branches_idx = users.users_branch_idx),'본점'),users_clocked_in,users_clock_in_at FROM users WHERE COALESCE(users_is_active,1)=1 ORDER BY users_created_at,users_idx"))
       .map(([id, name, role, branch, clockedIn, clockInAt]) => ({
         id,
         name,
@@ -1073,6 +1633,7 @@ async function readMariaDb() {
         clockedIn: clockedIn === "1",
         clockInAt: clockInAt ? new Date(clockInAt).toISOString() : null,
       }));
+    users = await ensureDefaultDeliveryMember(users);
 
     const adminMemos = (await mysqlQuery(`SELECT admin_memos_idx,${sqlBase64("admin_memos_title")},${sqlBase64("admin_memos_body")},admin_memos_created_at FROM admin_memos ORDER BY admin_memos_created_at DESC`))
       .map(([id, title, body, createdAt]) => ({ id, title: fromSqlBase64(title), body: fromSqlBase64(body), createdAt: toIso(createdAt) }));
@@ -1217,7 +1778,7 @@ function toIso(value) {
 }
 
 async function cleanupExpiredChatMessages() {
-  const expired = await mysqlQuery(`SELECT chat_attachments_file_path FROM chat_attachments WHERE chat_attachments_message_idx IN (SELECT chat_messages_idx FROM chat_messages WHERE chat_messages_created_at < DATE_SUB(NOW(), INTERVAL 1 MONTH))`);
+  const expired = await mysqlQuery(`SELECT chat_attachments_file_path FROM chat_attachments WHERE chat_attachments_message_idx IN (SELECT chat_messages_idx FROM chat_messages WHERE chat_messages_created_at < DATE_SUB(NOW(), INTERVAL 3 DAY))`);
   expired.forEach(([filePath]) => {
     const resolved = resolvePhotoPath(filePath);
     if (!resolved || !isInsideChatPhotoRoot(resolved) || !fs.existsSync(resolved)) return;
@@ -1227,8 +1788,8 @@ async function cleanupExpiredChatMessages() {
       logWarning("Expired chat photo delete failed", error.message || error);
     }
   });
-  await mysqlExec(`DELETE FROM chat_attachments WHERE chat_attachments_message_idx IN (SELECT chat_messages_idx FROM chat_messages WHERE chat_messages_created_at < DATE_SUB(NOW(), INTERVAL 1 MONTH))`);
-  await mysqlExec(`DELETE FROM chat_messages WHERE chat_messages_created_at < DATE_SUB(NOW(), INTERVAL 1 MONTH)`);
+  await mysqlExec(`DELETE FROM chat_attachments WHERE chat_attachments_message_idx IN (SELECT chat_messages_idx FROM chat_messages WHERE chat_messages_created_at < DATE_SUB(NOW(), INTERVAL 3 DAY))`);
+  await mysqlExec(`DELETE FROM chat_messages WHERE chat_messages_created_at < DATE_SUB(NOW(), INTERVAL 3 DAY)`);
 }
 
 async function cleanupExpiredTrashPhotos() {
@@ -1332,6 +1893,10 @@ function normalizeDb(db) {
     db.activeUserId = "user-1";
   }
 
+  if (!db.users.some((user) => isDeliveryRoleValue(user.role))) {
+    db.users.push({ id: "delivery-route", name: "배송", role: "배송전용", branch: "본점", clockedIn: false, clockInAt: null });
+  }
+
   db.users.forEach((user, index) => {
     if (looksBroken(user.name)) user.name = index === 0 ? "김베베" : "이유모";
     if (looksBroken(user.role)) user.role = index === 0 ? "관리자" : "직원";
@@ -1414,8 +1979,24 @@ function normalizeDb(db) {
 }
 
 function sendJson(res, status, body) {
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(body));
+  const payload = Buffer.from(JSON.stringify(body));
+  const acceptsGzip = /(?:^|,)\s*gzip\s*(?:,|$)/i.test(String(res.req?.headers?.["accept-encoding"] || ""));
+  if (acceptsGzip && payload.length >= 4096) {
+    const compressed = gzipSync(payload, { level: 5 });
+    res.writeHead(status, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Encoding": "gzip",
+      "Content-Length": compressed.length,
+      "Vary": "Accept-Encoding",
+    });
+    res.end(compressed);
+    return;
+  }
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": payload.length,
+  });
+  res.end(payload);
 }
 
 function sendHtml(res, status, html) {
@@ -1595,7 +2176,20 @@ function safeName(name) {
 
 function normalizeOrderSerial(value) {
   const source = String(value || "").trim();
-  return source.match(/\b(?:AB|BA|A|B)\d{2,4}\b/i)?.[0]?.toUpperCase() || source;
+  return source.match(/\b(?:AB|BA|A|B)\d{2,4}\b/i)?.[0]?.toUpperCase() || findDateSerial(source) || source;
+}
+
+function findDateSerial(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (!/^\d{6}$/.test(digits)) return "";
+  const month = Number(digits.slice(2, 4));
+  const day = Number(digits.slice(4, 6));
+  return month >= 1 && month <= 12 && day >= 1 && day <= 31 ? digits : "";
+}
+
+function registrationDateFromDateSerial(serial) {
+  const dateSerial = findDateSerial(serial);
+  return dateSerial ? `${dateSerial.slice(0, 2)}/${dateSerial.slice(2, 4)}/${dateSerial.slice(4, 6)}` : "";
 }
 
 function serialPlacePrefix(value, serial) {
@@ -1626,22 +2220,28 @@ function normalizeChatRoom(value) {
 
 function parseChatOrderText(rawText) {
   const raw = String(rawText || "").trim();
-  const serial = raw.match(/\b(?:AB|BA|A|B)\d{2,4}\b/i)?.[0]?.toUpperCase() || "";
-  if (!serial) return null;
+  const prefixedSerial = raw.match(/\b(?:AB|BA|A|B)\d{2,4}\b/i)?.[0]?.toUpperCase() || "";
   const parts = raw.split("/").map((part) => part.trim()).filter(Boolean);
+  const dateSerialIndex = prefixedSerial ? -1 : parts.findIndex((part) => findDateSerial(part));
+  const serial = prefixedSerial || (dateSerialIndex >= 0 ? findDateSerial(parts[dateSerialIndex]) : "");
+  if (!serial) return null;
   if (parts.length < 3) return null;
   const serialIndex = parts.findIndex((part) => part.toUpperCase().includes(serial));
   if (serialIndex < 0) return null;
   const isB = serial.startsWith("B");
-  const datePart = parts[serialIndex + (isB ? 2 : 1)] || "";
-  const productStart = Math.max(0, serialIndex + (isB ? 3 : 3));
+  const isDateSerialOrder = Boolean(findDateSerial(serial));
+  const datePart = isDateSerialOrder ? serial : parts[serialIndex + (isB ? 2 : 1)] || "";
+  const afterSerial = parts.slice(serialIndex + 1);
+  const timeText = isDateSerialOrder && /(?:오전|오후|AM|PM|\d{1,2}\s*시)/i.test(afterSerial[0] || "") ? afterSerial.shift() : "";
+  const productStart = isDateSerialOrder ? serialIndex + 2 + (timeText ? 1 : 0) : Math.max(0, serialIndex + (isB ? 3 : 3));
   const productText = parts.slice(productStart).join(" / ");
   const contactTail = isB ? parts[serialIndex + 1] || "" : "";
-  const region = !isB && serialIndex > 0 ? parts[0] : "";
-  const address = !isB ? parts[serialIndex + 2] || "" : "";
+  const region = (!isB || isDateSerialOrder) && serialIndex > 0 ? parts[0] : "";
+  const address = isDateSerialOrder ? afterSerial[0] || "" : (!isB ? parts[serialIndex + 2] || "" : "");
   const requestMemo = [
     `복사 원문: ${raw}`,
     region ? `지역: ${region}` : "",
+    timeText ? `시간: ${timeText}` : "",
     contactTail ? `연락처 뒷 번호: ${contactTail}` : "",
     productText ? `제품/브랜드 원문: ${productText}` : "",
   ].filter(Boolean).join("\n");
@@ -1678,7 +2278,7 @@ function inferChatProductType(value = "") {
 
 function parseChatPhotoStepUpload(rawText) {
   const text = String(rawText || "").trim();
-  const serial = text.match(/\b(?:AB|BA|A|B)\d{2,4}\b/i)?.[0]?.toUpperCase() || "";
+  const serial = text.match(/\b(?:AB|BA|A|B)\d{2,4}\b/i)?.[0]?.toUpperCase() || findDateSerial(text) || "";
   if (!serial) return null;
   if (/(\uC811\uC218|\uC785\uACE0)/u.test(text)) return { serial, stepCode: "01" };
   if (/\uB77C\uBCA8/u.test(text)) return { serial, stepCode: "02" };
@@ -1699,17 +2299,25 @@ async function saveDataUrlPhoto(order, stepCode, dataUrl, originalName, uploaded
 
   const mime = match[1];
   const isImage = /^image\//.test(mime);
-  const ext = isImage ? ".jpg" : getMediaExtension(mime, originalName);
   const now = new Date();
   const folder = path.join(PHOTO_ROOT, "bebeu", monthFolder(now), order.serial, stepCode);
   fs.mkdirSync(folder, { recursive: true });
 
+  const inputBuffer = Buffer.from(match[2], "base64");
+  const resizedBuffer = isImage ? await safeResizeImageBuffer(inputBuffer, {
+    source: "data-url-photo",
+    serial: order.serial,
+    stepCode,
+    mimeType: mime,
+    originalName,
+  }) : null;
+  const storedBuffer = resizedBuffer || inputBuffer;
+  const storedMime = isImage && resizedBuffer ? "image/jpeg" : mime;
+  const ext = isImage && resizedBuffer ? ".jpg" : getMediaExtension(mime, originalName);
   const stamp = now.toISOString().replace(/[-:T.Z]/g, "").slice(0, 14);
   const originalBase = path.basename(originalName || "photo", path.extname(originalName || ""));
   const filename = `${order.serial}_${stepCode}_${stamp}_${randomUUID()}_${safeName(originalBase)}${ext}`;
   const filePath = path.join(folder, filename);
-  const inputBuffer = Buffer.from(match[2], "base64");
-  const storedBuffer = isImage ? await resizeImageBuffer(inputBuffer) : inputBuffer;
   fs.writeFileSync(filePath, storedBuffer);
   const url = `/photos/${encodeURIComponent(order.id)}/${encodeURIComponent(filename)}`;
 
@@ -1727,7 +2335,7 @@ async function saveDataUrlPhoto(order, stepCode, dataUrl, originalName, uploaded
     displayFilePath: isImage ? filePath : null,
     displayUrl: isImage ? url : null,
     originalName: originalName || filename,
-    mimeType: isImage ? "image/jpeg" : mime,
+    mimeType: storedMime,
     uploadedBy: uploadedBy || order.worker,
     uploadedAt: now.toISOString(),
   };
@@ -1738,18 +2346,28 @@ async function saveUploadedPhoto(order, stepCode, file, uploadedBy, productIndex
   if (!/^(image|video)\//.test(mime)) throw new Error("사진 또는 동영상 파일만 저장할 수 있습니다.");
 
   const isImage = /^image\//.test(mime);
-  const ext = isImage ? ".jpg" : getMediaExtension(mime, file.originalName);
   const now = new Date();
   const folder = path.join(PHOTO_ROOT, "bebeu", monthFolder(now), order.serial, stepCode);
   fs.mkdirSync(folder, { recursive: true });
 
+  const resizedBuffer = isImage
+    ? (displayFile && /^image\//.test(displayFile.mimeType || "")
+      ? displayFile.buffer
+      : await safeResizeImageBuffer(file.buffer, {
+        source: "order-photo",
+        serial: order.serial,
+        stepCode,
+        mimeType: mime,
+        originalName: file.originalName,
+      }))
+    : null;
+  const storedBuffer = isImage ? (resizedBuffer || file.buffer) : file.buffer;
+  const storedMime = isImage && resizedBuffer ? "image/jpeg" : mime;
+  const ext = isImage && resizedBuffer ? ".jpg" : getMediaExtension(mime, file.originalName);
   const stamp = now.toISOString().replace(/[-:T.Z]/g, "").slice(0, 14);
   const originalBase = path.basename(file.originalName || "photo", path.extname(file.originalName || ""));
   const filename = `${order.serial}_${stepCode}_${stamp}_${randomUUID()}_${safeName(originalBase)}${ext}`;
   const filePath = path.join(folder, filename);
-  const storedBuffer = isImage
-    ? (displayFile && /^image\//.test(displayFile.mimeType || "") ? displayFile.buffer : await resizeImageBuffer(file.buffer))
-    : file.buffer;
   fs.writeFileSync(filePath, storedBuffer);
   const url = `/photos/${encodeURIComponent(order.id)}/${encodeURIComponent(filename)}`;
 
@@ -1767,7 +2385,7 @@ async function saveUploadedPhoto(order, stepCode, file, uploadedBy, productIndex
     displayFilePath: isImage ? filePath : null,
     displayUrl: isImage ? url : null,
     originalName: file.originalName || filename,
-    mimeType: isImage ? "image/jpeg" : mime,
+    mimeType: storedMime,
     uploadedBy: uploadedBy || order.worker,
     uploadedAt: now.toISOString(),
   };
@@ -1782,11 +2400,19 @@ async function saveUploadedChatAttachment(file, messageId, sortOrder = 0) {
   const folder = path.join(CHAT_PHOTO_ROOT, monthFolder(now));
   fs.mkdirSync(folder, { recursive: true });
 
+  const resizedBuffer = await safeResizeImageBuffer(file.buffer, {
+    source: "chat-photo",
+    messageId,
+    mimeType: mime,
+    originalName: file.originalName,
+  });
+  const storedBuffer = resizedBuffer || file.buffer;
+  const storedMime = resizedBuffer ? "image/jpeg" : mime;
+  const storedExt = resizedBuffer ? ext : getMediaExtension(mime, file.originalName);
   const stamp = now.toISOString().replace(/[-:T.Z]/g, "").slice(0, 14);
   const originalBase = path.basename(file.originalName || "photo", path.extname(file.originalName || ""));
-  const filename = `chat_${stamp}_${randomUUID()}_${safeName(originalBase)}${ext}`;
+  const filename = `chat_${stamp}_${randomUUID()}_${safeName(originalBase)}${storedExt}`;
   const filePath = path.join(folder, filename);
-  const storedBuffer = await resizeImageBuffer(file.buffer);
   fs.writeFileSync(filePath, storedBuffer);
 
   return {
@@ -1795,7 +2421,7 @@ async function saveUploadedChatAttachment(file, messageId, sortOrder = 0) {
     filePath,
     url: `/chat-photos/${encodeURIComponent(monthFolder(now))}/${encodeURIComponent(filename)}`,
     originalName: file.originalName || filename,
-    mimeType: "image/jpeg",
+    mimeType: storedMime,
     sortOrder: normalizePhotoSortOrder(sortOrder),
     createdAt: now.toISOString(),
   };
@@ -1809,9 +2435,11 @@ function displayPhotoFilename(order, stepCode, originalName = "photo") {
 
 function getMediaExtension(mime, originalName = "") {
   const ext = path.extname(originalName).toLowerCase();
-  if ([".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov", ".m4v", ".webm"].includes(ext)) return ext;
+  if ([".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".mp4", ".mov", ".m4v", ".webm"].includes(ext)) return ext;
   if (mime.includes("png")) return ".png";
   if (mime.includes("webp")) return ".webp";
+  if (mime.includes("heic")) return ".heic";
+  if (mime.includes("heif")) return ".heif";
   if (mime.includes("mp4")) return ".mp4";
   if (mime.includes("quicktime")) return ".mov";
   if (mime.includes("webm")) return ".webm";
@@ -2247,8 +2875,8 @@ function normalizeNaverCafeSettings(body = {}, previous = {}) {
     enabled: Boolean(body.enabled),
     clientId: String(body.clientId || "").trim() || merged.clientId || defaults.clientId,
     clientSecret: clientSecret || merged.clientSecret || defaults.clientSecret,
-    clubId: String(body.clubId || "").trim() || defaults.clubId,
-    menuId: String(body.menuId || "").trim() || defaults.menuId,
+    clubId: String(body.clubId || "").trim() || merged.clubId || defaults.clubId,
+    menuId: String(body.menuId || "").trim() || merged.menuId || defaults.menuId,
     accessToken: accessToken || merged.accessToken || "",
     refreshToken: refreshToken || merged.refreshToken || "",
     tokenExpiresAt: merged.tokenExpiresAt || null,
@@ -2317,11 +2945,33 @@ function getRequestAdmin(req, users) {
 }
 
 function normalizeMemberRole(value) {
-  return isAdminRoleValue(value) || value === "admin" ? ADMIN_ROLE_LABEL : STAFF_ROLE_LABEL;
+  if (isAdminRoleValue(value) || value === "admin") return ADMIN_ROLE_LABEL;
+  if (isDeliveryRoleValue(value) || value === "delivery") return DELIVERY_ROLE_LABEL;
+  return STAFF_ROLE_LABEL;
 }
 
 function normalizeMemberName(value) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, 80);
+}
+
+async function ensureDefaultDeliveryMember(users = []) {
+  if (users.some((user) => isDeliveryRoleValue(user.role))) return users;
+  const member = {
+    id: "delivery-route",
+    name: "배송",
+    role: DELIVERY_ROLE_LABEL,
+    branch: "본점",
+    clockedIn: false,
+    clockInAt: null,
+  };
+  try {
+    await mysqlExec("INSERT IGNORE INTO branches (branches_idx,branches_name) VALUES ('branch-1','본점')");
+    await mysqlExec(`INSERT INTO users (users_idx,users_branch_idx,users_name,users_role,users_password_hash,users_is_active,users_clocked_in,users_clock_in_at) VALUES (${sql(member.id)},'branch-1',${sql(member.name)},${sql(member.role)},${sql(passwordHash(DEFAULT_MEMBER_PASSWORD))},1,0,NULL) ON DUPLICATE KEY UPDATE users_name=VALUES(users_name),users_role=VALUES(users_role),users_password_hash=COALESCE(users_password_hash,VALUES(users_password_hash)),users_is_active=1,users_clocked_in=0,users_clock_in_at=NULL`);
+    return [...users, member];
+  } catch (error) {
+    logWarning("Default delivery member create skipped", error.message || error);
+    return users;
+  }
 }
 
 async function insertMemberRow(member) {
@@ -2422,6 +3072,7 @@ function mapTrashPhotoRow(row) {
 }
 
 async function readTrashSummary() {
+  if (trashSummaryCache) return trashSummaryCache;
   await ensureMariaDbColumns();
   const deletedOrders = (await mysqlQuery(`SELECT orders_idx,orders_serial,orders_registration_date,orders_route_type,orders_customer_name,orders_customer_phone,orders_customer_address,orders_product_type,orders_brand,orders_model_name,${sqlBase64("orders_request_memo")},orders_worker,orders_current_step,orders_status,orders_share_status,orders_is_urgent,orders_created_at,orders_updated_at,orders_completed_at,orders_deleted_at,orders_deleted_by FROM orders WHERE orders_deleted_at IS NOT NULL ORDER BY orders_deleted_at DESC LIMIT 200`))
     .map((row) => {
@@ -2461,7 +3112,8 @@ async function readTrashSummary() {
   }
   const deletedPhotos = (await mysqlQuery(`SELECT p.photos_idx,p.photos_order_idx,o.orders_serial,p.photos_product_index,p.photos_sort_order,p.photos_is_pinned,p.photos_pinned_at,p.photos_step_code,p.photos_step_name,p.photos_file_path,p.photos_url,p.photos_display_file_path,p.photos_display_url,p.photos_original_file_name,p.photos_mime_type,${sqlBase64("p.photos_memo")},p.photos_uploaded_by,p.photos_uploaded_at,p.photos_deleted_at,p.photos_deleted_by FROM photos p LEFT JOIN orders o ON o.orders_idx=p.photos_order_idx WHERE p.photos_is_deleted = 1 ORDER BY p.photos_deleted_at DESC,p.photos_uploaded_at DESC LIMIT 300`))
     .map(mapTrashPhotoRow);
-  return { orders: deletedOrders, photos: deletedPhotos };
+  trashSummaryCache = { orders: deletedOrders, photos: deletedPhotos };
+  return trashSummaryCache;
 }
 
 async function readPhotoByOrderAndFilename(orderId, filename) {
@@ -2511,6 +3163,18 @@ async function resizeImageBuffer(buffer, maxSize = 1400, quality = 72) {
       mozjpeg: true,
     })
     .toBuffer();
+}
+
+async function safeResizeImageBuffer(buffer, context = {}) {
+  try {
+    return await resizeImageBuffer(buffer);
+  } catch (error) {
+    logWarning("Image resize skipped", JSON.stringify({
+      ...context,
+      reason: error?.message || String(error),
+    }));
+    return null;
+  }
 }
 
 async function updatePhotoDisplayPath(photoId, displayFilePath, displayUrl) {
@@ -4015,8 +4679,36 @@ async function deleteKeepNoteRow(noteId) {
 }
 
 async function handleApi(req, res, pathname) {
+  if (req.method === "GET" && pathname === "/api/runtime-version") {
+    return sendJson(res, 200, { version: BEBEU_RUNTIME_VERSION });
+  }
+
   if (req.method === "GET" && pathname === "/api/health") {
     return sendJson(res, 200, { ok: true, service: "bebeu", time: new Date().toISOString() });
+  }
+
+  if (req.method === "GET" && pathname === "/api/naver-map.js") {
+    const clientId = String(NAVER_MAPS_CLIENT_ID || "").trim();
+    if (!clientId) {
+      res.writeHead(404, { "Content-Type": "application/javascript; charset=utf-8" });
+      return res.end("window.__BEBEU_NAVER_MAP_ERROR__='네이버 지도 Client ID가 설정되지 않았습니다.';");
+    }
+    const mapUrl = `https://oapi.map.naver.com/openapi/v3/maps.js?ncpKeyId=${encodeURIComponent(clientId)}&submodules=geocoder&callback=__BEBEU_NAVER_MAP_READY__`;
+    res.writeHead(200, {
+      "Content-Type": "application/javascript; charset=utf-8",
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      Pragma: "no-cache",
+    });
+    return res.end(`(() => {
+  const script = document.createElement("script");
+  script.src = ${JSON.stringify(mapUrl)};
+  script.async = true;
+  script.onerror = () => {
+    window.__BEBEU_NAVER_MAP_ERROR__ = "네이버 지도 SDK를 불러오지 못했습니다.";
+    window.__BEBEU_NAVER_MAP_READY__?.();
+  };
+  document.head.appendChild(script);
+})();`);
   }
 
   if (req.method === "GET" && pathname === "/api/bootstrap") {
@@ -4026,11 +4718,205 @@ async function handleApi(req, res, pathname) {
     const keys = ensureVapidKeys();
     const trash = await readTrashSummary();
     const { appSettings, ...clientDb } = db;
-    return sendJson(res, 200, { steps, photoRoot: PHOTO_ROOT, serverHost: req.headers.host, pushPublicKey: keys?.publicKey || "", pushSupported: Boolean(webPush && keys?.publicKey), ...clientDb, naverCafeSettings: naverCafeSettingsForClient(appSettings.naverCafe), smsTemplates: normalizeSmsTemplates(appSettings.smsTemplates || {}), keepNotes, trash });
+    return sendJson(res, 200, { steps, photoRoot: PHOTO_ROOT, serverHost: req.headers.host, pushPublicKey: keys?.publicKey || "", pushSupported: Boolean(webPush && keys?.publicKey), ...clientDb, naverCafeSettings: naverCafeSettingsForClient(appSettings.naverCafe), mapSettings: mapSettingsForClient(appSettings.map), deliveryLocation: deliveryLocationForClient(appSettings.deliveryLocation), deliveryJobs: normalizeDeliveryJobs(appSettings.deliveryJobs, db.orders), smsTemplates: normalizeSmsTemplates(appSettings.smsTemplates || {}), keepNotes, trash });
   }
 
   if (req.method === "GET" && pathname === "/api/trash") {
     return sendJson(res, 200, { trash: await readTrashSummary() });
+  }
+
+  if (req.method === "GET" && pathname === "/api/delivery/location") {
+    const db = await readDb();
+    const user = getRequestUser(req, db);
+    if (!user || (!isAdminRoleValue(user.role) && !isDeliveryRoleValue(user.role))) {
+      return sendJson(res, 403, { error: "배송 위치를 확인할 권한이 없습니다." });
+    }
+    return sendJson(res, 200, {
+      deliveryLocation: deliveryLocationForClient(db.appSettings?.deliveryLocation),
+    });
+  }
+
+  if (req.method === "GET" && pathname === "/api/delivery/location/stream") {
+    const db = await readDb();
+    const user = getRequestUser(req, db);
+    if (!user || !isAdminRoleValue(user.role)) {
+      return sendJson(res, 403, { error: "배송 위치를 실시간으로 확인할 권한이 없습니다." });
+    }
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-store, no-cache, must-revalidate, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    res.flushHeaders?.();
+    res.write("retry: 2000\n\n");
+    writeDeliveryLocationStream(res, db.appSettings?.deliveryLocation);
+    deliveryLocationStreams.add(res);
+    req.socket?.setKeepAlive?.(true, 15000);
+    req.socket?.setTimeout?.(0);
+    const heartbeat = setInterval(() => {
+      if (res.destroyed || res.writableEnded) return;
+      res.write(`: keep-alive ${Date.now()}\n\n`);
+    }, 15000);
+    const close = () => {
+      clearInterval(heartbeat);
+      deliveryLocationStreams.delete(res);
+    };
+    req.once("close", close);
+    res.once("close", close);
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/delivery/location") {
+    const db = await readDb();
+    const user = getRequestUser(req, db);
+    if (!user || !isDeliveryRoleValue(user.role)) {
+      return sendJson(res, 403, { error: "배송 전용 계정만 위치를 전송할 수 있습니다." });
+    }
+    const body = await readBody(req);
+    const latitude = Number(body.latitude);
+    const longitude = Number(body.longitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      return sendJson(res, 400, { error: "위치 좌표를 확인하지 못했습니다." });
+    }
+    const location = {
+      userId: user.id,
+      userName: user.name,
+      latitude,
+      longitude,
+      accuracy: Number(body.accuracy) || 0,
+      updatedAt: new Date().toISOString(),
+    };
+    await upsertAppSetting("deliveryLocation", location);
+    invalidateDbCache();
+    broadcastDeliveryLocation(location);
+    return sendJson(res, 200, { deliveryLocation: deliveryLocationForClient(location) });
+  }
+
+  if (req.method === "POST" && pathname === "/api/delivery/jobs") {
+    const db = await readDb();
+    const user = getRequestUser(req, db);
+    if (!user) return sendJson(res, 403, { error: "로그인이 필요합니다." });
+    const body = await readBody(req);
+    const orderIds = uniqueTextValues(Array.isArray(body.orderIds) ? body.orderIds : []);
+    if (!orderIds.length) return sendJson(res, 400, { error: "추가할 완료 항목을 선택해 주세요." });
+    const jobs = normalizeDeliveryJobs(db.appSettings?.deliveryJobs, db.orders);
+    const jobByOrderId = new Map(jobs.map((job) => [job.orderId, job]));
+    const added = [];
+    for (const orderId of orderIds) {
+      const order = db.orders.find((item) => item.id === orderId && item.status === "완료");
+      if (!order || !String(order.address || "").trim()) continue;
+      const job = deliveryJobFromOrder(order, user.name, jobByOrderId.get(orderId));
+      jobByOrderId.set(orderId, job);
+      added.push(job);
+      addLog(db, order, "배송 추가", DELIVERY_JOB_READY);
+      await insertLogRow(db.logs[0]);
+    }
+    if (!added.length) return sendJson(res, 400, { error: "주소가 저장된 완료 항목을 선택해 주세요." });
+    const nextJobs = normalizeDeliveryJobs([...jobByOrderId.values()], db.orders);
+    await upsertAppSetting("deliveryJobs", nextJobs);
+    invalidateDbCache();
+    return sendJson(res, 200, { deliveryJobs: nextJobs, addedOrderIds: added.map((job) => job.orderId) });
+  }
+
+  if (req.method === "DELETE" && pathname === "/api/delivery/jobs") {
+    const db = await readDb();
+    const user = getRequestUser(req, db);
+    if (!user) return sendJson(res, 403, { error: "로그인이 필요합니다." });
+    await upsertAppSetting("deliveryJobs", []);
+    invalidateDbCache();
+    return sendJson(res, 200, { deliveryJobs: [] });
+  }
+
+  if (req.method === "POST" && pathname === "/api/delivery/jobs/route") {
+    const db = await readDb();
+    const user = getRequestUser(req, db);
+    if (!user) return sendJson(res, 403, { error: "로그인이 필요합니다." });
+    const body = await readBody(req);
+    const orderIds = uniqueTextValues(Array.isArray(body.orderIds) ? body.orderIds : []);
+    const orderIndex = new Map(orderIds.map((orderId, index) => [orderId, index + 1]));
+    const now = new Date().toISOString();
+    const jobs = normalizeDeliveryJobs(db.appSettings?.deliveryJobs, db.orders).map((job) => {
+      if (job.status !== DELIVERY_JOB_READY || !orderIndex.has(job.orderId)) return job;
+      return { ...job, routeOrder: orderIndex.get(job.orderId), plannedAt: now, updatedAt: now };
+    });
+    await upsertAppSetting("deliveryJobs", jobs);
+    invalidateDbCache();
+    return sendJson(res, 200, { deliveryJobs: jobs });
+  }
+
+  const deliveryJobMatch = pathname.match(/^\/api\/delivery\/jobs\/([^/]+)$/);
+  if (deliveryJobMatch && req.method === "PATCH") {
+    const db = await readDb();
+    const user = getRequestUser(req, db);
+    if (!user) return sendJson(res, 403, { error: "로그인이 필요합니다." });
+    const orderId = decodeURIComponent(deliveryJobMatch[1]);
+    const body = await readBody(req);
+    const status = body.status === DELIVERY_JOB_COMPLETED ? DELIVERY_JOB_COMPLETED : DELIVERY_JOB_READY;
+    const now = new Date().toISOString();
+    let changed = false;
+    const jobs = normalizeDeliveryJobs(db.appSettings?.deliveryJobs, db.orders).map((job) => {
+      if (job.orderId !== orderId) return job;
+      changed = true;
+      return {
+        ...job,
+        status,
+        completedAt: status === DELIVERY_JOB_COMPLETED ? now : null,
+        completedBy: status === DELIVERY_JOB_COMPLETED ? user.name : "",
+        routeOrder: status === DELIVERY_JOB_COMPLETED ? job.routeOrder : null,
+        plannedAt: status === DELIVERY_JOB_COMPLETED ? job.plannedAt : null,
+        updatedAt: now,
+      };
+    });
+    if (!changed) return sendJson(res, 404, { error: "배송 항목을 찾을 수 없습니다." });
+    await upsertAppSetting("deliveryJobs", jobs);
+    const order = db.orders.find((item) => item.id === orderId);
+    if (order) {
+      addLog(db, order, status, status === DELIVERY_JOB_COMPLETED ? "배송 처리 완료" : "배송 전으로 변경");
+      await insertLogRow(db.logs[0]);
+    }
+    invalidateDbCache();
+    return sendJson(res, 200, { deliveryJobs: jobs });
+  }
+
+  if (deliveryJobMatch && req.method === "DELETE") {
+    const db = await readDb();
+    const user = getRequestUser(req, db);
+    if (!user) return sendJson(res, 403, { error: "로그인이 필요합니다." });
+    const orderId = decodeURIComponent(deliveryJobMatch[1]);
+    const jobs = normalizeDeliveryJobs(db.appSettings?.deliveryJobs, db.orders);
+    const nextJobs = jobs.filter((job) => job.orderId !== orderId);
+    if (nextJobs.length === jobs.length) return sendJson(res, 404, { error: "배송 항목을 찾을 수 없습니다." });
+    await upsertAppSetting("deliveryJobs", nextJobs);
+    invalidateDbCache();
+    return sendJson(res, 200, { deliveryJobs: nextJobs });
+  }
+
+  if (req.method === "POST" && pathname === "/api/delivery/route") {
+    const db = await readDb();
+    const user = getRequestUser(req, db);
+    if (!user) return sendJson(res, 403, { error: "로그인이 필요합니다." });
+    const body = await readBody(req);
+    const addresses = Array.isArray(body.addresses)
+      ? body.addresses.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 25)
+      : [];
+    if (!addresses.length) return sendJson(res, 400, { error: "주소를 먼저 입력해 주세요." });
+    const naverSettings = { ...defaultNaverCafeSettings(), ...(db.appSettings?.naverCafe || {}) };
+    const knownAddresses = uniqueTextValues([
+      ...(db.orders || []).map((order) => order.address),
+      ...normalizeDeliveryJobs(db.appSettings?.deliveryJobs, db.orders).map((job) => job.address),
+    ]);
+    const result = await buildNaverDeliveryRoute({
+      addresses,
+      origin: body.origin || null,
+      preserveOrder: body.preserveOrder === true,
+      knownAddresses,
+      searchCredentials: {
+        clientId: naverSettings.clientId,
+        clientSecret: naverSettings.clientSecret,
+      },
+    });
+    return sendJson(res, 200, result);
   }
 
   const trashOrderRestoreMatch = pathname.match(/^\/api\/trash\/orders\/([^/]+)\/restore$/);
@@ -4194,6 +5080,7 @@ async function handleApi(req, res, pathname) {
     const user = db.users.find((item) => item.id === body.userId);
     if (!user) return sendJson(res, 403, { error: "계정을 선택해주세요." });
     if (pathname === "/api/auth/admin-login" && !isAdminRoleValue(user.role)) return sendJson(res, 403, { error: "관리자 계정을 선택해주세요." });
+    if (isDeliveryRoleValue(user.role) && pathname === "/api/auth/login") return sendJson(res, 200, { user });
     const storedHash = await readUserPasswordHash(user.id);
     if (!passwordMatches(storedHash, body.password, user.role)) return sendJson(res, 401, { error: "비밀번호가 맞지 않습니다." });
     return sendJson(res, 200, { user });
@@ -4513,6 +5400,7 @@ async function handleApi(req, res, pathname) {
     const user = getRequestUser(req, db);
     const order = makeOrder({
       serial: normalizedSerial,
+      registrationDate: body.registrationDate || registrationDateFromDateSerial(normalizedSerial) || undefined,
       customerName: body.customerName || null,
       phone: body.phone || null,
       address: body.address || null,

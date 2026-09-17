@@ -1,3 +1,62 @@
+const BOOTSTRAP_CACHE_DB_NAME = "bebeu-bootstrap-cache";
+const BOOTSTRAP_CACHE_STORE_NAME = "responses";
+let bootstrapViewInitialized = false;
+
+function bootstrapCacheKey() {
+  return `${configuredServerBase() || window.location.origin}:${state.currentUserId || "anonymous"}`;
+}
+
+function openBootstrapCacheDb() {
+  return new Promise((resolve) => {
+    if (!window.indexedDB) {
+      resolve(null);
+      return;
+    }
+    const request = indexedDB.open(BOOTSTRAP_CACHE_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(BOOTSTRAP_CACHE_STORE_NAME)) {
+        request.result.createObjectStore(BOOTSTRAP_CACHE_STORE_NAME, { keyPath: "key" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => resolve(null);
+  });
+}
+
+async function readBootstrapCache() {
+  const db = await openBootstrapCacheDb();
+  if (!db) return null;
+  return new Promise((resolve) => {
+    const transaction = db.transaction(BOOTSTRAP_CACHE_STORE_NAME, "readonly");
+    const request = transaction.objectStore(BOOTSTRAP_CACHE_STORE_NAME).get(bootstrapCacheKey());
+    request.onsuccess = () => {
+      const data = request.result?.data;
+      resolve(data && Array.isArray(data.users) && Array.isArray(data.orders) ? data : null);
+    };
+    request.onerror = () => resolve(null);
+    transaction.oncomplete = () => db.close();
+    transaction.onerror = () => db.close();
+  });
+}
+
+async function writeBootstrapCache(data) {
+  if (!data || !Array.isArray(data.users) || !Array.isArray(data.orders)) return;
+  const db = await openBootstrapCacheDb();
+  if (!db) return;
+  await new Promise((resolve) => {
+    const transaction = db.transaction(BOOTSTRAP_CACHE_STORE_NAME, "readwrite");
+    transaction.objectStore(BOOTSTRAP_CACHE_STORE_NAME).put({
+      key: bootstrapCacheKey(),
+      savedAt: Date.now(),
+      data,
+    });
+    transaction.oncomplete = resolve;
+    transaction.onerror = resolve;
+    transaction.onabort = resolve;
+  });
+  db.close();
+}
+
 async function api(path, options = {}) {
   const response = await fetch(serverUrl(path), {
     headers: {
@@ -90,14 +149,10 @@ async function readResponseBody(response) {
   }
 }
 
-async function load() {
-  if (isNativeApp() && !configuredServerBase()) {
-    renderNativeServerSetup();
-    return;
-  }
-  state.data = await api("/api/bootstrap");
+function applyBootstrapData(data, initializeView = false) {
+  state.data = data;
   migrateLocalSmsTemplatesToDb();
-  restoreViewState();
+  if (initializeView) restoreViewState();
   applyUserAppearance();
   const validStepCodes = new Set(state.data.steps.map((step) => step.code));
   if (state.filter !== "all" && !validStepCodes.has(state.filter)) state.filter = "all";
@@ -105,9 +160,37 @@ async function load() {
   if (state.selectedOrderId && !state.data.orders.some((order) => order.id === state.selectedOrderId)) {
     state.selectedOrderId = null;
   }
-  setupAppHistory();
+  if (initializeView) setupAppHistory();
   render();
-  consumeLaunchRoute();
+  if (initializeView) consumeLaunchRoute();
+}
+
+async function load() {
+  if (isNativeApp() && !configuredServerBase()) {
+    renderNativeServerSetup();
+    return;
+  }
+  const isInitialLoad = !bootstrapViewInitialized;
+  const networkRequest = api("/api/bootstrap")
+    .then((data) => ({ data, error: null }))
+    .catch((error) => ({ data: null, error }));
+  let cacheApplied = false;
+  if (isInitialLoad) {
+    const cached = await readBootstrapCache();
+    if (cached) {
+      applyBootstrapData(cached, true);
+      bootstrapViewInitialized = true;
+      cacheApplied = true;
+    }
+  }
+  const result = await networkRequest;
+  if (result.error) {
+    if (cacheApplied) return;
+    throw result.error;
+  }
+  writeBootstrapCache(result.data).catch(() => {});
+  applyBootstrapData(result.data, !bootstrapViewInitialized);
+  bootstrapViewInitialized = true;
 }
 
 function migrateLocalSmsTemplatesToDb() {
@@ -197,7 +280,11 @@ function activeUser() {
 }
 
 function isAdminUser(user = activeUser()) {
-  return user?.role === "관리자" || user?.role === "愿由ъ옄";
+  return user?.role === "관리자" || user?.role === "\u613f\u0080\u7531\u044a\uc604";
+}
+
+function isDeliveryOnlyUser(user = activeUser()) {
+  return user?.role === "배송전용" || user?.role === "배송";
 }
 
 function userFontScaleKey(userId = state.currentUserId) {
@@ -567,16 +654,44 @@ function render() {
     return;
   }
 
+  const deliveryOnly = isDeliveryOnlyUser();
+  const showDeliveryTab = state.deliveryTabEnabled || deliveryOnly;
+
+  if (state.tab !== "delivery") {
+    stopDeliveryLocationStream();
+    stopDeliveryWorkerTracking();
+  }
+
+  if (deliveryOnly) {
+    state.tab = "delivery";
+    state.selectedOrderId = null;
+    state.query = "";
+    clearPhotoSelection();
+    clearDoneOrderSelection();
+  } else if (state.tab === "delivery" && !showDeliveryTab) {
+    state.tab = "more";
+  }
+
+  const bottomTabs = document.querySelector(".bottom-tabs");
+  if (bottomTabs) bottomTabs.hidden = false;
+  bottomTabs?.classList.toggle("has-delivery-tab", showDeliveryTab);
+  bottomTabs?.classList.toggle("is-delivery-only", deliveryOnly);
+
+  document.querySelectorAll(".tab-button").forEach((button) => {
+    button.hidden = deliveryOnly ? button.dataset.tab !== "delivery" : button.dataset.tab === "delivery" && !showDeliveryTab;
+  });
+
   saveViewState();
   document.querySelectorAll(".tab-button").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.tab === state.tab);
   });
 
-  if (state.selectedOrderId) return renderDetail();
+  if (!deliveryOnly && state.selectedOrderId) return renderDetail();
   if (state.tab === "me") return renderMeKeep();
   if (state.tab === "chat") return renderChat();
   if (state.tab === "work") return renderWork();
   if (state.tab === "done") return renderDone();
+  if (state.tab === "delivery" && showDeliveryTab) return renderDelivery();
   return renderMore();
 }
 

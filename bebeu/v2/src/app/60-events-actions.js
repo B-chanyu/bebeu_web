@@ -49,6 +49,10 @@
   if (target.dataset.loginUser) {
     const user = state.data.users.find((item) => item.id === target.dataset.loginUser);
     if (!user) return;
+    if (isDeliveryOnlyUser(user)) {
+      loginAsUser(user.id);
+      return;
+    }
     state.pendingAdminLoginUserId = user.id;
     state.adminLoginError = "";
     render();
@@ -56,7 +60,28 @@
     return;
   }
 
+  if (target.dataset.deliveryTabToggle) {
+    state.deliveryTabEnabled = target.dataset.deliveryTabToggle === "on";
+    localStorage.setItem(DELIVERY_TAB_ENABLED_KEY, state.deliveryTabEnabled ? "1" : "0");
+    if (!state.deliveryTabEnabled && state.tab === "delivery") {
+      state.tab = "more";
+    }
+    render();
+    showToast(state.deliveryTabEnabled ? "배송 탭을 켰습니다." : "배송 탭을 껐습니다.");
+    return;
+  }
+
   if (target.dataset.tab) {
+    if (isDeliveryOnlyUser() && target.dataset.tab !== "delivery") {
+      state.tab = "delivery";
+      state.selectedOrderId = null;
+      render();
+      return;
+    }
+    if (target.dataset.tab === "delivery" && !state.deliveryTabEnabled && !isDeliveryOnlyUser()) {
+      showToast("설정에서 배송 동선 탭을 ON으로 켜주세요.");
+      return;
+    }
     state.tab = target.dataset.tab;
     state.selectedOrderId = null;
     state.query = "";
@@ -235,6 +260,68 @@
     await deferredInstallPrompt.userChoice;
     deferredInstallPrompt = null;
     render();
+    return;
+  }
+
+  if (target.id === "deliveryLocateButton") {
+    requestDeliveryLocation();
+    return;
+  }
+
+  if (target.id === "deliveryOrderPickerButton") {
+    state.deliveryOrderPickerOpen = !state.deliveryOrderPickerOpen;
+    state.selectedDeliveryOrderIds = [];
+    state.deliveryOrderQuery = "";
+    render();
+    requestAnimationFrame(() => document.querySelector("#deliveryOrderSearchInput")?.focus());
+    return;
+  }
+
+  if (target.id === "deliveryOrderPickerCloseButton") {
+    state.deliveryOrderPickerOpen = false;
+    state.selectedDeliveryOrderIds = [];
+    state.deliveryOrderQuery = "";
+    render();
+    return;
+  }
+
+  if (target.dataset.deliveryOrderSelect) {
+    toggleDeliveryOrderSelection(target.dataset.deliveryOrderSelect);
+    return;
+  }
+
+  if (target.id === "deliveryOrdersAddButton") {
+    await addSelectedDeliveryOrders();
+    return;
+  }
+
+  if (target.dataset.deliveryJobComplete) {
+    await completeDeliveryJob(target.dataset.deliveryJobComplete);
+    return;
+  }
+
+  if (target.dataset.deliveryJobRemove) {
+    await removeDeliveryJob(target.dataset.deliveryJobRemove);
+    return;
+  }
+
+  if (target.id === "deliveryOptimizeButton") {
+    await buildDeliveryRoute();
+    return;
+  }
+
+  if (target.id === "deliveryCopyButton") {
+    await copyDeliveryRoute();
+    return;
+  }
+
+  if (target.id === "deliveryClearButton") {
+    await clearDeliveryRoute();
+    return;
+  }
+
+  if (target.dataset.openDeliveryAddress) {
+    window.open(naverMapSearchUrl(target.dataset.openDeliveryAddress), "_blank", "noopener");
     return;
   }
 

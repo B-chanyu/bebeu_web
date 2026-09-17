@@ -5,8 +5,8 @@ function parseOrderPaste() {
     return;
   }
   try {
-    const type = usesBOrderFormat() ? "B" : "A";
-    applyParsedOrder(type === "B" ? parseBOrder(raw) : parseAOrder(raw));
+    const parsed = parseDateSerialOrder(raw) || (usesBOrderFormat() ? parseBOrder(raw) : parseAOrder(raw));
+    applyParsedOrder(parsed);
   } catch (error) {
     alert(error.message || "붙여넣기 내용을 인식하지 못했습니다.");
   }
@@ -24,10 +24,66 @@ function findSerial(value) {
   return String(value || "").match(/\b(?:AB|BA|A|B)\d{2,4}\b/i)?.[0]?.toUpperCase() || "";
 }
 
+function findDateSerial(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (!/^\d{6}$/.test(digits)) return "";
+  const month = Number(digits.slice(2, 4));
+  const day = Number(digits.slice(4, 6));
+  return month >= 1 && month <= 12 && day >= 1 && day <= 31 ? digits : "";
+}
+
+function isDateSerial(value) {
+  return Boolean(findDateSerial(value));
+}
+
 function serialForOrderType(serial, type = state.orderType) {
   const source = String(serial || "").trim().toUpperCase();
+  if (isDateSerial(source)) return findDateSerial(source);
   const number = source.match(/\d{2,4}/)?.[0] || "";
   return number && ["A", "B", "AB", "BA"].includes(type) ? `${type}${number}` : source;
+}
+
+function registrationDateFromSerialOrRange(serial, dateRange) {
+  const dateSerial = findDateSerial(serial);
+  if (dateSerial) return `${dateSerial.slice(0, 2)}/${dateSerial.slice(2, 4)}/${dateSerial.slice(4, 6)}`;
+  const digits = String(dateRange || "").split("-")[0]?.replace(/\D/g, "") || "";
+  const now = new Date();
+  const yy = String(now.getFullYear()).slice(-2);
+  if (digits.length >= 6) return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4, 6)}`;
+  if (digits.length === 4) return `${yy}/${digits.slice(0, 2)}/${digits.slice(2, 4)}`;
+  return "";
+}
+
+function parseDateSerialOrder(raw) {
+  const parts = raw.split("/").map(cleanPastePart).filter(Boolean);
+  const serialIndex = parts.findIndex((part) => findDateSerial(part));
+  if (serialIndex < 0) return null;
+  const serial = findDateSerial(parts[serialIndex]);
+  const beforeSerial = parts[serialIndex].replace(serial, "").trim();
+  const region = [...parts.slice(0, serialIndex), beforeSerial].filter(Boolean).join(" ");
+  const rest = parts.slice(serialIndex + 1);
+  const timeText = /(?:오전|오후|AM|PM|\d{1,2}\s*시)/i.test(rest[0] || "") ? rest.shift() : "";
+  const address = rest.shift() || "";
+  const productText = rest.join(" / ");
+  const brandModel = inferBrandModel(productText);
+  const products = inferProducts(productText);
+  return {
+    serial,
+    dateRange: `${serial.slice(2, 4)}${serial.slice(4, 6)}`,
+    address,
+    doorInfo: "",
+    productTypes: inferProductTypes(productText),
+    brand: products[0]?.brand || brandModel.brand,
+    modelName: products[0]?.modelName || brandModel.modelName || productText,
+    products,
+    customerName: null,
+    requestMemo: [
+      raw ? `복사 원문: ${raw}` : "",
+      region ? `지역: ${region}` : "",
+      timeText ? `시간: ${timeText}` : "",
+      productText ? `제품/브랜드 원문: ${productText}` : "",
+    ].filter(Boolean).join("\n"),
+  };
 }
 
 function parseAOrder(raw) {

@@ -10,6 +10,7 @@ const APP_PARTS = [
   "10-api-core.js",
   "20-chat-auth.js",
   "30-me-attendance-notes.js",
+  "35-delivery-route.js",
   "40-orders-list-detail.js",
   "50-settings-share.js",
   "60-events-actions.js",

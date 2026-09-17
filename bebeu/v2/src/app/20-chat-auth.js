@@ -444,9 +444,12 @@ function focusOrderInWorkList(orderId) {
 
 function renderLogin() {
   title.textContent = "로그인";
+  const bottomTabs = document.querySelector(".bottom-tabs");
+  if (bottomTabs) bottomTabs.hidden = true;
   document.querySelectorAll(".tab-button").forEach((button) => button.classList.remove("is-active"));
   const admins = state.data.users.filter((user) => isAdminUser(user));
-  const staffs = state.data.users.filter((user) => !isAdminUser(user));
+  const deliveryUsers = state.data.users.filter((user) => isDeliveryOnlyUser(user));
+  const staffs = state.data.users.filter((user) => !isAdminUser(user) && !isDeliveryOnlyUser(user));
 
   content.innerHTML = `
     <section class="login-hero">
@@ -462,10 +465,15 @@ function renderLogin() {
       <div class="section-title"><h3>직원</h3><span class="chip">${staffs.length}명</span></div>
       ${staffs.map(renderLoginUser).join("") || `<p class="helper">직원 계정이 없습니다.</p>`}
     </section>
+    <section class="panel stack">
+      <div class="section-title"><h3>배송 전용</h3><span class="chip">${deliveryUsers.length}명</span></div>
+      ${deliveryUsers.map(renderLoginUser).join("") || `<p class="helper">배송 전용 계정이 없습니다.</p>`}
+    </section>
   `;
 }
 
 function renderLoginUser(user) {
+  const passwordless = isDeliveryOnlyUser(user);
   const selected = state.pendingAdminLoginUserId === user.id;
   return `
     <button class="login-user" type="button" data-login-user="${user.id}">
@@ -473,9 +481,9 @@ function renderLoginUser(user) {
         <strong>${escapeDisplay(user.name)}</strong>
         <small>${escapeDisplay(user.branch || "본점")} · ${escapeDisplay(user.role)}</small>
       </span>
-      <em>로그인</em>
+      <em>${passwordless ? "바로 입장" : "로그인"}</em>
     </button>
-    ${selected ? `
+    ${selected && !passwordless ? `
       <form class="admin-login-form" id="adminLoginForm">
         <input type="hidden" name="userId" value="${escapeHtml(user.id)}">
         <label>비밀번호
@@ -490,7 +498,7 @@ function renderLoginUser(user) {
 
 function chatLinkedOrder(message) {
   const source = String(message.body || "");
-  const serial = findSerial(source);
+  const serial = findSerial(source) || findDateSerial(source);
   if (!serial) return null;
   return (state.data?.orders || []).find((order) => String(order.serial || "").toUpperCase() === serial.toUpperCase()) || null;
 }
@@ -501,7 +509,8 @@ function loginAsUser(userId) {
   state.pendingAdminLoginUserId = null;
   state.adminLoginError = "";
   applyUserAppearance();
-  state.tab = "me";
+  const user = state.data.users.find((item) => item.id === userId);
+  state.tab = isDeliveryOnlyUser(user) ? "delivery" : "me";
   state.selectedOrderId = null;
   replaceAppHistory();
   render();
@@ -552,10 +561,6 @@ async function submitNaverCafeSettings(form) {
   const formData = new FormData(form);
   const payload = {
     enabled: formData.get("enabled") === "on",
-    clientId: formData.get("clientId")?.trim() || "",
-    clientSecret: formData.get("clientSecret")?.trim() || "",
-    clubId: formData.get("clubId")?.trim() || "",
-    menuId: formData.get("menuId")?.trim() || "",
     titleTemplate: formData.get("titleTemplate")?.trim() || "",
     contentTemplate: formData.get("contentTemplate")?.trim() || "",
     includePhotos: formData.get("includePhotos") || "all",
