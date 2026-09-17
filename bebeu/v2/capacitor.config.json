@@ -1,0 +1,10 @@
+{
+  "appId": "cloud.bebeu.work",
+  "appName": "BEBEU WORK",
+  "webDir": "public",
+  "server": {
+    "hostname": "localhost",
+    "iosScheme": "capacitor",
+    "androidScheme": "https"
+  }
+}

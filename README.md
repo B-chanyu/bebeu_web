@@ -42,6 +42,10 @@
 - 사진 휴지통 및 복구 기능
 - PWA 설치와 모바일 화면 최적화
 
+## iOS 빌드 준비
+
+`bebeu/v2`에는 Capacitor 설정이 있으며, `main`에 푸시하면 GitHub Actions의 macOS 환경에서 iOS 시뮬레이터 빌드를 검사합니다. 이 검사는 서명되지 않은 빌드로, App Store에 제출하는 IPA는 아닙니다. 자세한 내용은 [네이티브 빌드 안내](docs/native-build.md)를 참고하세요.
+
 ## 기술 스택
 
 - Frontend: Vanilla JavaScript, HTML, CSS, PWA Service Worker
