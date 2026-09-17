@@ -6,6 +6,8 @@
   "scripts": {
     "build:app": "node scripts/build-public-app.js",
     "start": "npm run build:app && node server.js",
+    "serve:managed": "node scripts/server-supervisor.js",
+    "reload:managed": "node scripts/request-server-reload.js",
     "check:encoding": "node scripts/check-text-integrity.js",
     "check": "node --check server.js && node --check public/app.js && node --check public/sw.js && npm run check:encoding",
     "native:sync": "cap sync",

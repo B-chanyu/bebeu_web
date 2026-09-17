@@ -2,9 +2,8 @@
 setlocal
 title bebeu server
 
-set "APP_DIR=%~dp0"
-if "%APP_DIR:~-1%"=="\" set "APP_DIR=%APP_DIR:~0,-1%"
 set "DATA_ROOT=C:\bebeyu"
+set "APP_DIR=%DATA_ROOT%\bebeu\v2"
 cd /d "%APP_DIR%"
 
 if not defined PHOTO_ROOT set "PHOTO_ROOT=%DATA_ROOT%\bebeu_image"
@@ -20,7 +19,7 @@ if not exist "%PHOTO_ROOT%" mkdir "%PHOTO_ROOT%"
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 
 echo.
-echo Starting bebeu server...
+echo Starting managed bebeu server...
 echo.
 echo PC address:
 echo   http://localhost:3000
@@ -40,18 +39,11 @@ echo.
 echo Database:
 echo   MariaDB bebeu at 127.0.0.1:3306
 echo.
+echo Keep this window open. Code updates are applied after a managed reload request.
 echo Close this window to stop the server.
 echo.
 
-npm run build:app
-if errorlevel 1 (
-  echo.
-  echo Failed to build public app.
-  pause
-  exit /b 1
-)
-
-node server.js
+npm run serve:managed
 
 echo.
 echo Server stopped.
