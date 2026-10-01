@@ -62,7 +62,9 @@ let appFontSizesCaptured = false;
 let deferredInstallPrompt = null;
 const APP_SERVER_KEY = "bebeu.nativeServerUrl";
 const DEFAULT_NATIVE_SERVER_URL = "https://app.bebeu.cloud";
-const CUSTOMER_SHARE_CACHE_VERSION = "320";
+const CUSTOMER_SHARE_CACHE_VERSION = "327";
+const APP_RELEASE_VERSION = "327";
+const APP_ANDROID_VERSION = "1.5";
 
 const state = {
   tab: "me",
@@ -845,6 +847,32 @@ function pushAppHistory() {
   saveViewState();
   if (sameHistoryState(history.state, next)) return;
   history.pushState(next, "", window.location.pathname + window.location.search);
+}
+
+function nativeAppPlugin() {
+  return isNativeApp() ? window.Capacitor?.Plugins?.App : null;
+}
+
+function closeTopDialogForBack() {
+  const dialogs = Array.from(document.querySelectorAll("dialog[open]"));
+  const dialog = dialogs.at(-1);
+  if (!dialog) return false;
+  const cancelEvent = new Event("cancel", { bubbles: false, cancelable: true });
+  const shouldClose = dialog.dispatchEvent(cancelEvent);
+  if (shouldClose && dialog.open) dialog.close();
+  return true;
+}
+
+function confirmAppExit() {
+  if (!confirm("앱을 종료할까요?")) return false;
+  const app = nativeAppPlugin();
+  if (app?.exitApp) {
+    app.exitApp().catch(() => {});
+    return true;
+  }
+  state.allowExit = true;
+  history.back();
+  return true;
 }
 
 function applyHistoryState(saved) {
@@ -5002,32 +5030,20 @@ function isStandaloneApp() {
 }
 
 function renderAppInstallSetting() {
-  const installed = isStandaloneApp();
-  const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent);
-  const secure = window.isSecureContext;
   const deliveryOn = state.deliveryTabEnabled;
-  let message = "휴대폰의 홈 화면에 설치하면 전체 화면으로 빠르게 실행할 수 있습니다.";
-  let action = `<button class="primary-button" type="button" id="installAppButton">앱으로 설치</button>`;
-
-  if (installed) {
-    message = "이 기기에서 앱으로 실행 중입니다.";
-    action = `<span class="app-install-status">설치 완료</span>`;
-  } else if (!secure) {
-    message = "현재 주소가 보안 연결(HTTPS)이 아니라서 브라우저 설치 기능이 제한될 수 있습니다.";
-    action = `<p class="helper">브라우저 메뉴에서 홈 화면에 추가를 선택해 주세요.</p>`;
-  } else if (isIos) {
-    message = "Safari 하단의 공유 버튼을 누른 뒤 홈 화면에 추가를 선택해 주세요.";
-    action = `<p class="helper">iPhone, iPad는 Safari에서 설치할 수 있습니다.</p>`;
-  }
 
   return `
     <section class="panel stack app-install-panel">
       <div class="section-title">
         <h3>bebeu 앱</h3>
-        <span class="chip">홈 화면 설치</span>
+        <span class="chip">배포 ${APP_RELEASE_VERSION}</span>
       </div>
-      <p class="helper">${message}</p>
-      ${action}
+      <div class="app-version-row">
+        <span>현재 배포 버전</span>
+        <strong>Android ${APP_ANDROID_VERSION} · v${APP_RELEASE_VERSION}</strong>
+      </div>
+      <p class="helper">Android 앱 설치 파일과 최신 업데이트를 다운로드할 수 있습니다.</p>
+      <button class="primary-button" type="button" id="installAppButton">앱으로 설치</button>
       <div class="delivery-tab-setting">
         <div>
           <strong>배송 동선 탭</strong>
@@ -5311,14 +5327,7 @@ async function handleClick(event) {
   }
 
   if (target.id === "installAppButton") {
-    if (!deferredInstallPrompt) {
-      alert("브라우저 메뉴에서 앱 설치 또는 홈 화면에 추가를 선택해 주세요.");
-      return;
-    }
-    deferredInstallPrompt.prompt();
-    await deferredInstallPrompt.userChoice;
-    deferredInstallPrompt = null;
-    render();
+    window.location.assign(serverUrl(`/download.html?v=${APP_RELEASE_VERSION}`));
     return;
   }
 
@@ -6860,7 +6869,7 @@ function openPhotoDialog(options = {}) {
   photoDialog.showModal();
 }
 
-function openListPhotoStepPicker(orderId) {
+function openListPhotoStepPicker(orderId, droppedFiles = []) {
   const order = state.data.orders.find((item) => item.id === orderId);
   if (!order) return;
   const existing = document.querySelector("#listPhotoStepDialog");
@@ -6899,6 +6908,9 @@ function openListPhotoStepPicker(orderId) {
     state.expandedPhotoId = null;
     dialog.close();
     openPhotoDialog({ listQuick: true });
+    if (droppedFiles.length) {
+      handleSelectedFiles(droppedFiles, "드래그 추가").catch((error) => alert(error.message));
+    }
   });
   dialog.addEventListener("close", () => dialog.remove());
   document.body.appendChild(dialog);
@@ -6924,6 +6936,61 @@ function openEditOrderDialog() {
   editOrderDialog.showModal();
 }
 
+const uploadReadyImages = new WeakSet();
+
+async function receiveDroppedPhotos(files, x, y) {
+  if (!state.data || !files.length) return;
+  if (photoDialog.open) {
+    await handleSelectedFiles(files, "드래그 추가");
+    return;
+  }
+  if (document.querySelector("dialog[open]")) return;
+  if (state.tab === "chat") {
+    await addChatFiles(files);
+    return;
+  }
+  const card = document.elementFromPoint(x, y)?.closest("[data-order-card-id]");
+  if (card && ["work", "done"].includes(state.tab)) {
+    openListPhotoStepPicker(card.dataset.orderCardId, files);
+  }
+}
+
+document.addEventListener("dragover", (event) => {
+  if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+});
+document.addEventListener("drop", (event) => {
+  const files = Array.from(event.dataTransfer?.files || []).filter((file) => /^image\//.test(file.type));
+  if (!files.length) return;
+  event.preventDefault();
+  receiveDroppedPhotos(files, event.clientX, event.clientY).catch((error) => alert(error.message));
+});
+window.addEventListener("bebeuPhotoDrop", async (event) => {
+  try {
+    const photos = event.detail?.photos || [];
+    const files = await Promise.all(photos.map((photo, index) => nativePhotoFile(photo, index, "drop")));
+    await receiveDroppedPhotos(files, event.detail.x, event.detail.y);
+  } catch (error) {
+    alert(error.message || "드래그한 사진을 읽지 못했습니다.");
+  }
+});
+window.addEventListener("bebeuPhotoDropError", () => {
+  alert("드래그한 사진을 읽지 못했습니다. 갤러리에서 다시 선택해 주세요.");
+});
+
+async function prepareMediaFiles(files, sourceLabel) {
+  const results = new Array(files.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(2, files.length) }, async () => {
+    while (next < files.length) {
+      const index = next++;
+      results[index] = await preparePendingMedia(files[index], sourceLabel);
+    }
+  }));
+  return results;
+}
+
 function imageBlobToFile(blob, originalName) {
   const base = String(originalName || "photo").replace(/\.[^.]+$/, "");
   return new File([blob], `${base}_display.jpg`, { type: "image/jpeg" });
@@ -6931,6 +6998,7 @@ function imageBlobToFile(blob, originalName) {
 
 async function createDisplayImageFile(file, maxSize = 1400, quality = 0.72) {
   if (!file.type.startsWith("image/")) return null;
+  if (uploadReadyImages.has(file)) return file;
   const bitmap = await createImageBitmap(file);
   const scale = Math.min(1, maxSize / Math.max(bitmap.width, bitmap.height));
   const width = Math.max(1, Math.round(bitmap.width * scale));
@@ -6971,7 +7039,7 @@ async function nativePhotoFile(photo, index, prefix) {
   const format = String(photo.format || blob.type.split("/")[1] || "jpg").replace("jpeg", "jpg");
   const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
   return new File([blob], `${prefix}_${stamp}_${String(index + 1).padStart(2, "0")}.${format}`, {
-    type: blob.type || `image/${format === "jpg" ? "jpeg" : format}`,
+    type: blob.type.startsWith("image/") ? blob.type : `image/${format === "jpg" ? "jpeg" : format}`,
   });
 }
 
@@ -6987,40 +7055,300 @@ async function pickNativeGalleryPhotos() {
     return;
   }
   try {
-    const result = await camera.pickImages({ quality: 100, limit: availableCount });
+    const result = await camera.pickImages({ quality: 72, width: 1400, height: 1400, limit: availableCount });
     const photos = Array.from(result.photos || []).slice(0, availableCount);
-    const files = await Promise.all(photos.map((photo, index) => nativePhotoFile(photo, index, "gallery")));
+    const files = new Array(photos.length);
+    let nextPhoto = 0;
+    await Promise.all(Array.from({ length: Math.min(2, photos.length) }, async () => {
+      while (nextPhoto < photos.length) {
+        const index = nextPhoto++;
+        const file = await nativePhotoFile(photos[index], index, "gallery");
+        uploadReadyImages.add(file);
+        files[index] = file;
+      }
+    }));
     await handleSelectedFiles(files, "갤러리");
   } catch (error) {
     if (!/cancel/i.test(String(error?.message || error))) throw error;
   }
 }
 
-async function takeNativeCameraPhotos() {
+function capturedPhotoFile(video, index) {
+  return new Promise((resolve, reject) => {
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+    if (!width || !height) {
+      reject(new Error("카메라 화면을 준비하고 있습니다. 잠시 후 다시 촬영해 주세요."));
+      return;
+    }
+    const canvas = document.createElement("canvas");
+    const scale = Math.min(1, 1400 / Math.max(width, height));
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const context = canvas.getContext("2d", { alpha: false });
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error("촬영한 사진을 저장하지 못했습니다."));
+        return;
+      }
+      const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
+      const file = new File([blob], `camera_${stamp}_${String(index + 1).padStart(2, "0")}.jpg`, { type: "image/jpeg" });
+      uploadReadyImages.add(file);
+      resolve(file);
+    }, "image/jpeg", 0.72);
+  });
+}
+
+async function requestContinuousCameraStream(facingMode = "environment") {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error("이 기기에서는 앱 내부 연속 촬영을 지원하지 않습니다.");
+  }
   const camera = nativeCameraPlugin();
-  if (!camera?.getPhoto) {
-    cameraInput.click();
+  if (camera?.requestPermissions) {
+    const permission = await camera.requestPermissions({ permissions: ["camera"] });
+    if (permission?.camera === "denied") throw new Error("카메라 권한을 허용해 주세요.");
+  }
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: facingMode },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+      },
+    });
+  } catch (error) {
+    if (/permission|denied|notallowed/i.test(String(error?.name || error?.message || error))) {
+      throw new Error("카메라 권한을 허용해 주세요.");
+    }
+    throw new Error("카메라를 시작하지 못했습니다.");
+  }
+}
+
+function openContinuousCamera(availableCount) {
+  return new Promise((resolve, reject) => {
+    const dialog = document.createElement("dialog");
+    dialog.className = "continuous-camera-dialog";
+    dialog.innerHTML = `
+      <section class="continuous-camera-shell">
+        <header class="continuous-camera-head">
+          <button class="camera-icon-button" type="button" data-camera-command="cancel" aria-label="촬영 취소">×</button>
+          <strong data-camera-title>사진 촬영</strong>
+          <span class="camera-count" data-camera-count>0 / ${availableCount}</span>
+        </header>
+        <section class="continuous-camera-live" data-camera-live>
+          <video autoplay muted playsinline aria-label="카메라 화면"></video>
+          <div class="camera-flash" aria-hidden="true"></div>
+        </section>
+        <section class="continuous-camera-review" data-camera-review hidden>
+          <div class="camera-review-head">
+            <div>
+              <strong>촬영한 사진 확인</strong>
+              <p>사진을 눌러 포함 여부를 선택하고, 휴지통으로 삭제할 수 있습니다.</p>
+            </div>
+            <button class="camera-text-button" type="button" data-camera-command="select-all">전체 선택</button>
+          </div>
+          <div class="camera-review-grid" data-camera-review-grid></div>
+        </section>
+        <div class="continuous-camera-strip" data-camera-strip aria-label="촬영한 사진"></div>
+        <footer class="continuous-camera-controls" data-camera-live-controls>
+          <span class="camera-control-spacer"></span>
+          <button class="camera-shutter" type="button" data-camera-command="capture" aria-label="사진 촬영"><span></span></button>
+          <button class="camera-next-button" type="button" data-camera-command="next" disabled>다음</button>
+        </footer>
+        <footer class="camera-review-controls" data-camera-review-controls hidden>
+          <button class="secondary-button" type="button" data-camera-command="retake">더 찍기</button>
+          <button class="primary-button" type="button" data-camera-command="complete">완료</button>
+        </footer>
+      </section>
+    `;
+
+    const video = dialog.querySelector("video");
+    const live = dialog.querySelector("[data-camera-live]");
+    const review = dialog.querySelector("[data-camera-review]");
+    const strip = dialog.querySelector("[data-camera-strip]");
+    const reviewGrid = dialog.querySelector("[data-camera-review-grid]");
+    const liveControls = dialog.querySelector("[data-camera-live-controls]");
+    const reviewControls = dialog.querySelector("[data-camera-review-controls]");
+    const title = dialog.querySelector("[data-camera-title]");
+    const count = dialog.querySelector("[data-camera-count]");
+    const nextButton = dialog.querySelector('[data-camera-command="next"]');
+    const completeButton = dialog.querySelector('[data-camera-command="complete"]');
+    const items = [];
+    let stream = null;
+    let closed = false;
+
+    const stopStream = () => {
+      stream?.getTracks().forEach((track) => track.stop());
+      stream = null;
+      video.srcObject = null;
+    };
+    const releaseItems = () => items.forEach((item) => {
+      if (item.url) URL.revokeObjectURL(item.url);
+    });
+    const finish = (files) => {
+      if (closed) return;
+      closed = true;
+      stopStream();
+      releaseItems();
+      dialog.close();
+      dialog.remove();
+      resolve(files);
+    };
+    const fail = (error) => {
+      if (closed) return;
+      closed = true;
+      stopStream();
+      releaseItems();
+      dialog.close();
+      dialog.remove();
+      reject(error);
+    };
+    const selectedFiles = () => items.filter((item) => item.selected && item.file).map((item) => item.file);
+    const renderStrip = () => {
+      strip.innerHTML = items.map((item, index) => `
+        ${item.url
+          ? `<img src="${item.url}" alt="촬영한 사진 ${index + 1}">`
+          : `<span class="camera-capture-pending" aria-label="사진 ${index + 1} 저장 중">저장 중</span>`}
+      `).join("");
+      strip.hidden = !items.length || review.hidden === false;
+      count.textContent = `${items.length} / ${availableCount}`;
+      nextButton.disabled = !items.length || items.some((item) => item.pending);
+    };
+    const renderReview = () => {
+      reviewGrid.innerHTML = items.map((item, index) => `
+        <article class="camera-review-item${item.selected ? " is-selected" : ""}" data-camera-photo="${index}">
+          <button class="camera-review-toggle" type="button" data-camera-command="toggle" data-camera-index="${index}" aria-label="사진 ${index + 1} ${item.selected ? "선택 해제" : "선택"}">
+            <img src="${item.url}" alt="촬영한 사진 ${index + 1}">
+            <span>${item.selected ? "✓" : ""}</span>
+          </button>
+          <button class="camera-review-delete" type="button" data-camera-command="delete" data-camera-index="${index}" aria-label="사진 ${index + 1} 삭제">⌫</button>
+        </article>
+      `).join("");
+      const selectedCount = selectedFiles().length;
+      count.textContent = `${selectedCount}장 선택`;
+      completeButton.disabled = selectedCount === 0;
+    };
+    const startStream = async () => {
+      stopStream();
+      stream = await requestContinuousCameraStream();
+      video.srcObject = stream;
+      await video.play();
+    };
+    const showLive = async () => {
+      review.hidden = true;
+      reviewControls.hidden = true;
+      live.hidden = false;
+      liveControls.hidden = false;
+      title.textContent = "사진 촬영";
+      renderStrip();
+      await startStream();
+    };
+    const showReview = () => {
+      stopStream();
+      live.hidden = true;
+      liveControls.hidden = true;
+      strip.hidden = true;
+      review.hidden = false;
+      reviewControls.hidden = false;
+      title.textContent = "사진 확인";
+      renderReview();
+    };
+
+    const captureImmediately = async () => {
+      if (closed || review.hidden === false || items.length >= availableCount) return;
+      const index = items.length;
+      const filePromise = capturedPhotoFile(video, index);
+      const item = { file: null, url: "", selected: true, pending: true };
+      items.push(item);
+
+      const flash = dialog.querySelector(".camera-flash");
+      flash.classList.remove("is-active");
+      void flash.offsetWidth;
+      flash.classList.add("is-active");
+      renderStrip();
+      strip.scrollLeft = strip.scrollWidth;
+
+      const file = await filePromise;
+      if (closed) return;
+      item.file = file;
+      item.url = URL.createObjectURL(file);
+      item.pending = false;
+      renderStrip();
+      strip.scrollLeft = strip.scrollWidth;
+      if (items.length >= availableCount && !items.some((entry) => entry.pending) && review.hidden) {
+        showReview();
+      }
+    };
+
+    dialog.addEventListener("pointerdown", (event) => {
+      const button = event.target.closest('[data-camera-command="capture"]');
+      if (!button || button.disabled) return;
+      event.preventDefault();
+      captureImmediately().catch(fail);
+    });
+
+    dialog.addEventListener("click", async (event) => {
+      const button = event.target.closest("[data-camera-command]");
+      if (!button || button.disabled) return;
+      const command = button.dataset.cameraCommand;
+      try {
+        if (command === "cancel") {
+          finish([]);
+        } else if (command === "capture") {
+          if (event.detail === 0) await captureImmediately();
+        } else if (command === "next") {
+          showReview();
+        } else if (command === "retake") {
+          await showLive();
+        } else if (command === "toggle") {
+          const item = items[Number(button.dataset.cameraIndex)];
+          if (item) item.selected = !item.selected;
+          renderReview();
+        } else if (command === "delete") {
+          const index = Number(button.dataset.cameraIndex);
+          const [removed] = items.splice(index, 1);
+          if (removed) URL.revokeObjectURL(removed.url);
+          if (!items.length) await showLive();
+          else renderReview();
+        } else if (command === "select-all") {
+          const shouldSelect = items.some((item) => !item.selected);
+          items.forEach((item) => { item.selected = shouldSelect; });
+          renderReview();
+        } else if (command === "complete") {
+          finish(selectedFiles());
+        }
+      } catch (error) {
+        fail(error);
+      }
+    });
+    dialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      finish([]);
+    });
+    document.body.appendChild(dialog);
+    dialog.showModal();
+    startStream().catch(fail);
+  });
+}
+
+async function takeNativeCameraPhotos() {
+  const availableCount = Math.max(0, PHOTO_UPLOAD_MAX_COUNT - state.pendingPhotos.length);
+  if (!availableCount) {
+    alert(`사진은 한 번에 최대 ${PHOTO_UPLOAD_MAX_COUNT}장까지 올릴 수 있습니다.`);
     return;
   }
-  const files = [];
-  const availableCount = Math.max(0, PHOTO_UPLOAD_MAX_COUNT - state.pendingPhotos.length);
-  try {
-    while (files.length < availableCount) {
-      const photo = await camera.getPhoto({
-        quality: 100,
-        resultType: "uri",
-        source: "CAMERA",
-        saveToGallery: false,
-        correctOrientation: true,
-      });
-      files.push(await nativePhotoFile(photo, files.length, "camera"));
-      if (state.quickPhotoAdvance || files.length >= availableCount) break;
-      if (!confirm(`${files.length}장 촬영했습니다. 계속 촬영할까요?`)) break;
-    }
-    await handleSelectedFiles(files, "사진 찍기");
-  } catch (error) {
-    if (!/cancel/i.test(String(error?.message || error))) throw error;
-  }
+  const files = await openContinuousCamera(availableCount);
+  if (files.length) await handleSelectedFiles(files, "사진 찍기");
+}
+
+async function handleWebCameraInput() {
+  const selectedFiles = Array.from(cameraInput.files || []);
+  cameraInput.value = "";
+  if (!selectedFiles.length) return;
+
+  await handleSelectedFiles(selectedFiles, "사진 찍기");
 }
 
 async function handleSelectedFiles(selectedFiles, sourceLabel) {
@@ -7030,18 +7358,9 @@ async function handleSelectedFiles(selectedFiles, sourceLabel) {
   if (selectedFiles.length > files.length) {
     alert(`사진은 한 번에 최대 ${PHOTO_UPLOAD_MAX_COUNT}장까지 올릴 수 있습니다. 초과한 사진은 제외했습니다.`);
   }
-  if (state.quickPhotoAdvance && sourceLabel === "사진 찍기") {
-    const loaded = await Promise.all(files.map((file) => preparePendingMedia(file, sourceLabel)));
-    state.pendingPhotos = [...state.pendingPhotos, ...loaded];
-    photoDialog.close();
-    showUploadProgress(0, state.pendingPhotos.length, "사진 업로드 준비 중");
-    await waitForPaint();
-    photoForm.requestSubmit();
-    return;
-  }
   photoPreview.innerHTML = `<div class="preview-empty">사진을 가볍게 준비하는 중입니다.</div>`;
   await waitForPaint();
-  const loaded = await Promise.all(files.map((file) => preparePendingMedia(file, sourceLabel)));
+  const loaded = await prepareMediaFiles(files, sourceLabel);
   state.pendingPhotos = [...state.pendingPhotos, ...loaded];
   renderPendingPhotos(sourceLabel);
 }
@@ -7103,7 +7422,7 @@ async function addChatFiles(selectedFiles) {
   }
   const picked = files.slice(0, availableCount);
   if (files.length > availableCount) alert(`사진은 한 번에 최대 ${PHOTO_UPLOAD_MAX_COUNT}장까지 올릴 수 있습니다.`);
-  const prepared = await Promise.all(picked.map((file) => preparePendingMedia(file, "채팅")));
+  const prepared = await prepareMediaFiles(picked, "채팅");
   state.chatPendingMedia = [...state.chatPendingMedia, ...prepared];
   refreshChatPendingPreview();
 }
@@ -7938,7 +8257,9 @@ document.querySelector("#pickPhotoButton").addEventListener("click", () => {
 document.querySelector("#parseOrderPasteButton").addEventListener("click", parseOrderPaste);
 setOrderType("A");
 renderProductFields();
-cameraInput.addEventListener("change", () => handlePhotoInput(cameraInput, "사진 촬영"));
+cameraInput.addEventListener("change", () => {
+  handleWebCameraInput().catch((error) => alert(error.message || "촬영한 사진을 불러오지 못했습니다."));
+});
 galleryInput.addEventListener("change", () => handlePhotoInput(galleryInput, "갤러리"));
 
 orderForm.addEventListener("submit", async (event) => {
@@ -8307,6 +8628,10 @@ document.querySelector("#refreshButton").addEventListener("click", async () => {
 });
 
 window.addEventListener("popstate", (event) => {
+  if (closeTopDialogForBack()) {
+    history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
+    return;
+  }
   if (state.chatExpandedAttachmentId) {
     rememberChatScrollForRender();
     state.chatExpandedAttachmentId = null;
@@ -8342,13 +8667,65 @@ window.addEventListener("popstate", (event) => {
     render();
     return;
   }
+  if (state.chatTransferMessageId) {
+    state.chatTransferMessageId = null;
+    history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
+    render();
+    return;
+  }
+  if (state.deliveryOrderPickerOpen) {
+    state.deliveryOrderPickerOpen = false;
+    state.selectedDeliveryOrderIds = [];
+    state.deliveryOrderQuery = "";
+    history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
+    render();
+    return;
+  }
+  if (state.keepEditingId) {
+    state.keepEditingId = null;
+    history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
+    render();
+    return;
+  }
+  if (state.passwordChangeOpen) {
+    state.passwordChangeOpen = false;
+    state.passwordChangeMessage = "";
+    history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
+    render();
+    return;
+  }
+  if (state.pendingAdminLoginUserId) {
+    state.pendingAdminLoginUserId = null;
+    state.adminLoginError = "";
+    history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
+    render();
+    return;
+  }
+  if (state.trashOpen) {
+    state.trashOpen = false;
+    state.trashSelectedPhotoIds = [];
+    history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
+    render();
+    return;
+  }
+  if (state.attendanceEditDay || state.attendancePayrollUserId) {
+    state.attendanceEditDay = null;
+    state.attendancePayrollUserId = null;
+    history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
+    render();
+    return;
+  }
   if (event.state?.exitGuard) {
     if (state.allowExit) return;
-    if (confirm("종료하시겠습니까?")) {
-      state.allowExit = true;
-      history.back();
+    if (state.selectedOrderId) {
+      state.selectedOrderId = null;
+      clearPhotoSelection();
+      state.expandedPhotoId = null;
+      history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
+      render();
       return;
     }
+    if (confirmAppExit()) return;
     history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
     return;
   }
@@ -8364,10 +8741,19 @@ window.addEventListener("popstate", (event) => {
     render();
     return;
   }
-  if (!confirm("종료하시겠습니까?")) {
+  if (!confirmAppExit()) {
     history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
   }
 });
+
+if (isNativeApp()) {
+  const nativeBackListener = nativeAppPlugin()?.addListener?.("backButton", () => {
+    if (closeTopDialogForBack()) return;
+    if (state.loadingMessage || state.savingOrder || state.savingPhoto) return;
+    history.back();
+  });
+  nativeBackListener?.catch?.(() => {});
+}
 
 if (!isNativeApp() && "serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").then((reg) => {

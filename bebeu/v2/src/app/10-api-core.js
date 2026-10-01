@@ -616,6 +616,32 @@ function pushAppHistory() {
   history.pushState(next, "", window.location.pathname + window.location.search);
 }
 
+function nativeAppPlugin() {
+  return isNativeApp() ? window.Capacitor?.Plugins?.App : null;
+}
+
+function closeTopDialogForBack() {
+  const dialogs = Array.from(document.querySelectorAll("dialog[open]"));
+  const dialog = dialogs.at(-1);
+  if (!dialog) return false;
+  const cancelEvent = new Event("cancel", { bubbles: false, cancelable: true });
+  const shouldClose = dialog.dispatchEvent(cancelEvent);
+  if (shouldClose && dialog.open) dialog.close();
+  return true;
+}
+
+function confirmAppExit() {
+  if (!confirm("앱을 종료할까요?")) return false;
+  const app = nativeAppPlugin();
+  if (app?.exitApp) {
+    app.exitApp().catch(() => {});
+    return true;
+  }
+  state.allowExit = true;
+  history.back();
+  return true;
+}
+
 function applyHistoryState(saved) {
   if (!saved) return;
   state.applyingHistory = true;

@@ -474,32 +474,20 @@ function isStandaloneApp() {
 }
 
 function renderAppInstallSetting() {
-  const installed = isStandaloneApp();
-  const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent);
-  const secure = window.isSecureContext;
   const deliveryOn = state.deliveryTabEnabled;
-  let message = "휴대폰의 홈 화면에 설치하면 전체 화면으로 빠르게 실행할 수 있습니다.";
-  let action = `<button class="primary-button" type="button" id="installAppButton">앱으로 설치</button>`;
-
-  if (installed) {
-    message = "이 기기에서 앱으로 실행 중입니다.";
-    action = `<span class="app-install-status">설치 완료</span>`;
-  } else if (!secure) {
-    message = "현재 주소가 보안 연결(HTTPS)이 아니라서 브라우저 설치 기능이 제한될 수 있습니다.";
-    action = `<p class="helper">브라우저 메뉴에서 홈 화면에 추가를 선택해 주세요.</p>`;
-  } else if (isIos) {
-    message = "Safari 하단의 공유 버튼을 누른 뒤 홈 화면에 추가를 선택해 주세요.";
-    action = `<p class="helper">iPhone, iPad는 Safari에서 설치할 수 있습니다.</p>`;
-  }
 
   return `
     <section class="panel stack app-install-panel">
       <div class="section-title">
         <h3>bebeu 앱</h3>
-        <span class="chip">홈 화면 설치</span>
+        <span class="chip">배포 ${APP_RELEASE_VERSION}</span>
       </div>
-      <p class="helper">${message}</p>
-      ${action}
+      <div class="app-version-row">
+        <span>현재 배포 버전</span>
+        <strong>Android ${APP_ANDROID_VERSION} · v${APP_RELEASE_VERSION}</strong>
+      </div>
+      <p class="helper">Android 앱 설치 파일과 최신 업데이트를 다운로드할 수 있습니다.</p>
+      <button class="primary-button" type="button" id="installAppButton">앱으로 설치</button>
       <div class="delivery-tab-setting">
         <div>
           <strong>배송 동선 탭</strong>

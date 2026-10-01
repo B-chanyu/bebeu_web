@@ -9,7 +9,9 @@ document.querySelector("#pickPhotoButton").addEventListener("click", () => {
 document.querySelector("#parseOrderPasteButton").addEventListener("click", parseOrderPaste);
 setOrderType("A");
 renderProductFields();
-cameraInput.addEventListener("change", () => handlePhotoInput(cameraInput, "사진 촬영"));
+cameraInput.addEventListener("change", () => {
+  handleWebCameraInput().catch((error) => alert(error.message || "촬영한 사진을 불러오지 못했습니다."));
+});
 galleryInput.addEventListener("change", () => handlePhotoInput(galleryInput, "갤러리"));
 
 orderForm.addEventListener("submit", async (event) => {
@@ -378,6 +380,10 @@ document.querySelector("#refreshButton").addEventListener("click", async () => {
 });
 
 window.addEventListener("popstate", (event) => {
+  if (closeTopDialogForBack()) {
+    history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
+    return;
+  }
   if (state.chatExpandedAttachmentId) {
     rememberChatScrollForRender();
     state.chatExpandedAttachmentId = null;
@@ -413,13 +419,65 @@ window.addEventListener("popstate", (event) => {
     render();
     return;
   }
+  if (state.chatTransferMessageId) {
+    state.chatTransferMessageId = null;
+    history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
+    render();
+    return;
+  }
+  if (state.deliveryOrderPickerOpen) {
+    state.deliveryOrderPickerOpen = false;
+    state.selectedDeliveryOrderIds = [];
+    state.deliveryOrderQuery = "";
+    history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
+    render();
+    return;
+  }
+  if (state.keepEditingId) {
+    state.keepEditingId = null;
+    history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
+    render();
+    return;
+  }
+  if (state.passwordChangeOpen) {
+    state.passwordChangeOpen = false;
+    state.passwordChangeMessage = "";
+    history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
+    render();
+    return;
+  }
+  if (state.pendingAdminLoginUserId) {
+    state.pendingAdminLoginUserId = null;
+    state.adminLoginError = "";
+    history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
+    render();
+    return;
+  }
+  if (state.trashOpen) {
+    state.trashOpen = false;
+    state.trashSelectedPhotoIds = [];
+    history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
+    render();
+    return;
+  }
+  if (state.attendanceEditDay || state.attendancePayrollUserId) {
+    state.attendanceEditDay = null;
+    state.attendancePayrollUserId = null;
+    history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
+    render();
+    return;
+  }
   if (event.state?.exitGuard) {
     if (state.allowExit) return;
-    if (confirm("종료하시겠습니까?")) {
-      state.allowExit = true;
-      history.back();
+    if (state.selectedOrderId) {
+      state.selectedOrderId = null;
+      clearPhotoSelection();
+      state.expandedPhotoId = null;
+      history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
+      render();
       return;
     }
+    if (confirmAppExit()) return;
     history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
     return;
   }
@@ -435,10 +493,19 @@ window.addEventListener("popstate", (event) => {
     render();
     return;
   }
-  if (!confirm("종료하시겠습니까?")) {
+  if (!confirmAppExit()) {
     history.pushState(appHistoryState(), "", window.location.pathname + window.location.search);
   }
 });
+
+if (isNativeApp()) {
+  const nativeBackListener = nativeAppPlugin()?.addListener?.("backButton", () => {
+    if (closeTopDialogForBack()) return;
+    if (state.loadingMessage || state.savingOrder || state.savingPhoto) return;
+    history.back();
+  });
+  nativeBackListener?.catch?.(() => {});
+}
 
 if (!isNativeApp() && "serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").then((reg) => {

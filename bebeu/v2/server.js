@@ -355,6 +355,8 @@ const mimeTypes = {
   ".mov": "video/quicktime",
   ".m4v": "video/x-m4v",
   ".webm": "video/webm",
+  ".apk": "application/vnd.android.package-archive",
+  ".zip": "application/zip",
 };
 
 function ensureStorage() {
@@ -2348,7 +2350,7 @@ async function saveUploadedPhoto(order, stepCode, file, uploadedBy, productIndex
   const isImage = /^image\//.test(mime);
   const now = new Date();
   const folder = path.join(PHOTO_ROOT, "bebeu", monthFolder(now), order.serial, stepCode);
-  fs.mkdirSync(folder, { recursive: true });
+  await fsp.mkdir(folder, { recursive: true });
 
   const resizedBuffer = isImage
     ? (displayFile && /^image\//.test(displayFile.mimeType || "")
@@ -2368,7 +2370,7 @@ async function saveUploadedPhoto(order, stepCode, file, uploadedBy, productIndex
   const originalBase = path.basename(file.originalName || "photo", path.extname(file.originalName || ""));
   const filename = `${order.serial}_${stepCode}_${stamp}_${randomUUID()}_${safeName(originalBase)}${ext}`;
   const filePath = path.join(folder, filename);
-  fs.writeFileSync(filePath, storedBuffer);
+  await fsp.writeFile(filePath, storedBuffer);
   const url = `/photos/${encodeURIComponent(order.id)}/${encodeURIComponent(filename)}`;
 
   return {
@@ -2398,7 +2400,7 @@ async function saveUploadedChatAttachment(file, messageId, sortOrder = 0) {
   const ext = ".jpg";
   const now = new Date();
   const folder = path.join(CHAT_PHOTO_ROOT, monthFolder(now));
-  fs.mkdirSync(folder, { recursive: true });
+  await fsp.mkdir(folder, { recursive: true });
 
   const resizedBuffer = await safeResizeImageBuffer(file.buffer, {
     source: "chat-photo",
@@ -2413,7 +2415,7 @@ async function saveUploadedChatAttachment(file, messageId, sortOrder = 0) {
   const originalBase = path.basename(file.originalName || "photo", path.extname(file.originalName || ""));
   const filename = `chat_${stamp}_${randomUUID()}_${safeName(originalBase)}${storedExt}`;
   const filePath = path.join(folder, filename);
-  fs.writeFileSync(filePath, storedBuffer);
+  await fsp.writeFile(filePath, storedBuffer);
 
   return {
     id: randomUUID(),
@@ -3150,6 +3152,12 @@ async function resizeImageWithSharp(sourcePath, targetPath, maxSize = 1400, qual
 
 async function resizeImageBuffer(buffer, maxSize = 1400, quality = 72) {
   if (!sharp) throw new Error("이미지 가공 기능을 사용할 수 없습니다.");
+  const metadata = await sharp(buffer, { failOn: "none" }).metadata();
+  // Client-prepared JPEGs need no second lossy encode.
+  if (metadata.format === "jpeg" && metadata.width > 0 && metadata.height > 0
+    && metadata.width <= maxSize && metadata.height <= maxSize
+    && (!metadata.orientation || metadata.orientation === 1)
+    && buffer.length <= 1024 * 1024) return buffer;
   return sharp(buffer, { failOn: "none" })
     .rotate()
     .resize({
@@ -6394,7 +6402,8 @@ function serveStatic(req, res, pathname) {
     return;
   }
   const ext = path.extname(filePath).toLowerCase();
-  const noCache = ["/", "/sw.js", "/app.js", "/styles.css", "/index.html"].includes(pathname);
+  const noCache = ["/", "/sw.js", "/app.js", "/styles.css", "/index.html", "/download.html", "/privacy.html"].includes(pathname)
+    || pathname.startsWith("/downloads/");
   const cacheControl = noCache
     ? "no-cache, no-store, must-revalidate"
     : "public, max-age=86400";

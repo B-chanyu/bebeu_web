@@ -252,14 +252,7 @@
   }
 
   if (target.id === "installAppButton") {
-    if (!deferredInstallPrompt) {
-      alert("브라우저 메뉴에서 앱 설치 또는 홈 화면에 추가를 선택해 주세요.");
-      return;
-    }
-    deferredInstallPrompt.prompt();
-    await deferredInstallPrompt.userChoice;
-    deferredInstallPrompt = null;
-    render();
+    window.location.assign(serverUrl(`/download.html?v=${APP_RELEASE_VERSION}`));
     return;
   }
 
@@ -1801,7 +1794,7 @@ function openPhotoDialog(options = {}) {
   photoDialog.showModal();
 }
 
-function openListPhotoStepPicker(orderId) {
+function openListPhotoStepPicker(orderId, droppedFiles = []) {
   const order = state.data.orders.find((item) => item.id === orderId);
   if (!order) return;
   const existing = document.querySelector("#listPhotoStepDialog");
@@ -1840,6 +1833,9 @@ function openListPhotoStepPicker(orderId) {
     state.expandedPhotoId = null;
     dialog.close();
     openPhotoDialog({ listQuick: true });
+    if (droppedFiles.length) {
+      handleSelectedFiles(droppedFiles, "드래그 추가").catch((error) => alert(error.message));
+    }
   });
   dialog.addEventListener("close", () => dialog.remove());
   document.body.appendChild(dialog);
