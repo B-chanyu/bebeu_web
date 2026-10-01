@@ -11,11 +11,14 @@
     "check:encoding": "node scripts/check-text-integrity.js",
     "check": "node --check server.js && node --check public/app.js && node --check public/sw.js && npm run check:encoding",
     "native:sync": "cap sync",
+    "native:android:sync": "npm run build:app && cap sync android && node scripts/prune-native-downloads.js android",
+    "native:android:bundle": "npm run native:android:sync && node scripts/build-android-release.js",
     "native:android": "cap open android",
     "native:ios": "cap open ios"
   },
   "dependencies": {
     "@capacitor/android": "^8.4.1",
+    "@capacitor/app": "^8.1.1",
     "@capacitor/camera": "^8.2.0",
     "@capacitor/core": "^8.4.1",
     "@capacitor/ios": "^8.4.1",

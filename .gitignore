@@ -27,6 +27,8 @@ bebeu/v1/
 .agents/
 .codex-audio-tools/
 .npm-cache/
+.android-studio-system/
+android-studio-bebeu.properties
 
 # Database dumps and local backups
 *.sql.gz
@@ -52,4 +54,14 @@ Thumbs.db
 
 # Native build output
 **/android/app/build/
+**/android/local.properties
 **/ios/App/build/
+*.jks
+*.keystore
+**/keystore.properties
+**/android/.idea/
+**/public/downloads/*.apk
+**/public/downloads/*.aab
+artifacts/
+tmp/
+.server-reload

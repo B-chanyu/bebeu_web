@@ -1,6 +1,6 @@
 {
   "appId": "cloud.bebeu.work",
-  "appName": "BEBEU WORK",
+  "appName": "베베유 관리자",
   "webDir": "public",
   "server": {
     "hostname": "localhost",
