@@ -59,9 +59,9 @@ let appFontSizesCaptured = false;
 let deferredInstallPrompt = null;
 const APP_SERVER_KEY = "bebeu.nativeServerUrl";
 const DEFAULT_NATIVE_SERVER_URL = "https://app.bebeu.cloud";
-const CUSTOMER_SHARE_CACHE_VERSION = "327";
-const APP_RELEASE_VERSION = "327";
-const APP_ANDROID_VERSION = "1.5";
+const CUSTOMER_SHARE_CACHE_VERSION = "331";
+const APP_RELEASE_VERSION = "331";
+const APP_ANDROID_VERSION = "1.16";
 
 const state = {
   tab: "me",

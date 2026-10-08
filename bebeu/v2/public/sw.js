@@ -1,16 +1,16 @@
-const CACHE_NAME = "bebeu-pwa-v327";
+const CACHE_NAME = "bebeu-pwa-v331";
 const APP_SHELL = [
   "/",
   "/index.html",
-  "/styles.css?v=327",
-  "/app.js?v=327",
+  "/styles.css?v=331",
+  "/app.js?v=331",
   "/manifest.webmanifest",
   "/icons/icon-192.png",
   "/icons/icon-512.png",
   "/icons/icon-maskable-512.png",
   "/icons/apple-touch-icon.png"
 ];
-const NETWORK_FIRST_PATHS = new Set(["/", "/index.html", "/styles.css", "/app.js"]);
+const NETWORK_FIRST_PATHS = new Set(["/", "/index.html", "/styles.css", "/app.js", "/delivery-map.html", "/delivery-map.js"]);
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));

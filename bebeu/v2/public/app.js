@@ -62,9 +62,9 @@ let appFontSizesCaptured = false;
 let deferredInstallPrompt = null;
 const APP_SERVER_KEY = "bebeu.nativeServerUrl";
 const DEFAULT_NATIVE_SERVER_URL = "https://app.bebeu.cloud";
-const CUSTOMER_SHARE_CACHE_VERSION = "327";
-const APP_RELEASE_VERSION = "327";
-const APP_ANDROID_VERSION = "1.5";
+const CUSTOMER_SHARE_CACHE_VERSION = "331";
+const APP_RELEASE_VERSION = "331";
+const APP_ANDROID_VERSION = "1.16";
 
 const state = {
   tab: "me",
@@ -104,6 +104,7 @@ const state = {
   trashExpandedPhotoId: null,
   chatTransferMessageId: null,
   photoPressTimer: null,
+  photoPressStart: null,
   orderPressTimer: null,
   suppressPhotoTap: false,
   suppressDoneOrderTap: false,
@@ -131,7 +132,6 @@ const state = {
   selectedDeliveryOrderIds: [],
   deliveryOrderQuery: "",
   deliveryTabEnabled: localStorage.getItem(DELIVERY_TAB_ENABLED_KEY) === "1",
-  deliveryAutoLocateRequested: false,
   attendancePayrollUserId: null,
   attendanceEditDay: null,
   trashSelectedPhotoIds: [],
@@ -342,28 +342,80 @@ async function uploadPhotosWithRetry(path, formData, retries = 1) {
   }
 }
 
-async function uploadPhotoBatches(order, pendingPhotos, selectedStep, memo, onProgress, advanceAfterUpload = false) {
+async function uploadQueueStore(mode, action) {
+  const db = await new Promise((resolve, reject) => {
+    const request = indexedDB.open("bebeu-photo-outbox", 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("jobs", { keyPath: "id" });
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction("jobs", mode);
+      const request = action(tx.objectStore("jobs"));
+      tx.oncomplete = () => resolve(request.result);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error("사진 임시 저장에 실패했습니다."));
+    });
+  } finally { db.close(); }
+}
+
+let recoveringPhotoUploads = false;
+async function recoverPhotoUploads() {
+  if (recoveringPhotoUploads || !state.currentUserId) return;
+  recoveringPhotoUploads = true;
+  try {
+    const jobs = await uploadQueueStore("readonly", (store) => store.getAll());
+    for (const job of jobs.filter((item) => item.owner === bootstrapCacheKey())) {
+      const order = state.data.orders.find((item) => item.id === job.orderId);
+      if (!order || !confirm(`${order.serial}: 저장되지 않은 사진 전송을 다시 진행할까요?`)) continue;
+      setGlobalLoading("남은 사진 전송 중...");
+      const result = await uploadPhotoBatches(order, [], job.step, job.memo, null, job.advance, job);
+      if (result?.order) replaceOrderInState(result.order);
+      render();
+      showToast("사진 저장이 완료되었습니다.");
+    }
+  } catch (error) { showToast(`사진 임시본은 유지됩니다. ${error.message}`); }
+  finally { setGlobalLoading(""); recoveringPhotoUploads = false; }
+}
+
+async function uploadPhotoBatches(order, pendingPhotos, selectedStep, memo, onProgress, advanceAfterUpload = false, savedJob = null) {
+  const job = savedJob || {
+    id: crypto.randomUUID(), owner: bootstrapCacheKey(), orderId: order.id,
+    step: selectedStep, memo, advance: advanceAfterUpload, offset: 0,
+    files: await Promise.all(pendingPhotos.map(readyUploadFile)),
+  };
+  // Persist all files before starting any network request.
+  await uploadQueueStore("readwrite", (store) => store.put(job));
   let uploadResult = null;
-  const total = pendingPhotos.length;
+  const total = job.files.length;
   const productIndex = 1;
-  for (let start = 0; start < pendingPhotos.length; start += PHOTO_UPLOAD_BATCH_SIZE) {
-    const batch = pendingPhotos.slice(start, start + PHOTO_UPLOAD_BATCH_SIZE);
+  for (let start = job.offset; start < total; start += PHOTO_UPLOAD_BATCH_SIZE) {
+    const uploadFiles = job.files.slice(start, start + PHOTO_UPLOAD_BATCH_SIZE);
+    const batch = uploadFiles;
     const formData = new FormData();
+    formData.append("uploadJobId", job.id);
     formData.append("stepCode", selectedStep);
     formData.append("productIndex", productIndex);
     formData.append("memo", memo);
     formData.append("uploadOffset", start);
-    if (advanceAfterUpload && start + batch.length >= pendingPhotos.length) formData.append("advance", "1");
-    batch.forEach((media) => {
-      const uploadFile = media.displayFile || media.file;
+    if (advanceAfterUpload && start + batch.length >= total) formData.append("advance", "1");
+    batch.forEach((media, index) => {
+      const uploadFile = uploadFiles[index];
       formData.append("files", uploadFile, uploadFile.name || media.originalName);
     });
     onProgress?.(start, total, `사진 업로드 중 (${Math.floor(start / PHOTO_UPLOAD_BATCH_SIZE) + 1}/${Math.ceil(total / PHOTO_UPLOAD_BATCH_SIZE)})`);
     await waitForPaint();
     uploadResult = await uploadPhotosWithRetry(`/api/orders/${order.id}/photo`, formData, 1);
+    if (!Array.isArray(uploadResult.photos) || uploadResult.photos.length !== batch.length) {
+      throw new Error("서버 저장 건수가 일치하지 않습니다. 사진 임시본은 보관됩니다.");
+    }
+    job.offset = start + batch.length;
+    await uploadQueueStore("readwrite", (store) => store.put(job));
     onProgress?.(Math.min(start + batch.length, total), total, "사진 저장 중");
     await waitForPaint();
   }
+  await uploadQueueStore("readwrite", (store) => store.delete(job.id));
   return uploadResult;
 }
 
@@ -424,6 +476,7 @@ async function load() {
   writeBootstrapCache(result.data).catch(() => {});
   applyBootstrapData(result.data, !bootstrapViewInitialized);
   bootstrapViewInitialized = true;
+  recoverPhotoUploads();
 }
 
 function migrateLocalSmsTemplatesToDb() {
@@ -2317,13 +2370,9 @@ function renderAdminMemoPanel(user) {
 const BEBEU_STORE_LOCATION = {
   name: "베베유",
   address: "전남광주 광산구 첨단내촌로57번길 6",
-  latitude: 35.220365,
-  longitude: 126.847487,
+  latitude: 35.211931,
+  longitude: 126.836767,
 };
-let naverMapScriptPromise = null;
-let deliveryMapInstance = null;
-let deliveryCurrentMarker = null;
-let deliveryWorkerMarker = null;
 let deliveryWorkerLocationWatchId = null;
 let deliveryLocationPollTimer = null;
 let deliveryLocationStreamController = null;
@@ -2331,6 +2380,122 @@ let deliveryLocationStreamRetryTimer = null;
 let lastDeliveryLocationSaveAt = 0;
 let lastDeliveryLocationSent = null;
 let deliveryRouteDrag = null;
+let deliveryTrip = { active: false, index: 0, route: [], userId: "" };
+let deliveryNativeWatchActive = false;
+let deliveryInitialFocusDone = false;
+let deliveryTripListenerPromise = null;
+let deliveryWorkerFocusDone = false;
+
+function nativeDeliveryTripPlugin() {
+  return isNativeApp() ? window.Capacitor?.Plugins?.DeliveryTrip : null;
+}
+
+function deliveryTripControls() {
+  if (!isDeliveryOnlyUser()) return "";
+  return `<div class="delivery-trip-controls" id="deliveryTripControls">
+    ${deliveryTrip.active ? `
+      <div class="delivery-trip-buttons">
+        <button type="button" id="deliveryPreviousButton" ${deliveryTrip.index === 0 ? "disabled" : ""}>이전</button>
+        <button type="button" id="deliveryNextButton" ${deliveryTrip.index >= deliveryTrip.route.length - 1 ? "disabled" : ""}>다음</button>
+        <button type="button" id="deliveryEndButton">종료</button>
+      </div>
+      <div class="delivery-next-address">${escapeHtml(deliveryTrip.route[deliveryTrip.index]?.address || "")}</div>
+    ` : `<button type="button" id="deliveryStartButton" ${isDeliveryRouteReady() ? "" : "disabled"}>배송 시작</button>`}
+  </div>`;
+}
+
+function applyDeliveryTrip(next) {
+  if (next.active && next.userId !== state.currentUserId) return;
+  deliveryTrip = { ...deliveryTrip, ...next };
+  const controls = document.querySelector("#deliveryTripControls");
+  if (controls) controls.outerHTML = deliveryTripControls();
+  const input = document.querySelector("#deliveryAddressInput");
+  if (input) input.disabled = deliveryTrip.active;
+  postDeliveryMapState(false);
+  if (deliveryTrip.active) focusDeliveryMap(deliveryTrip.route[deliveryTrip.index]);
+}
+
+async function initializeDeliveryTrip() {
+  const plugin = nativeDeliveryTripPlugin();
+  if (!plugin) return;
+  if (!deliveryTripListenerPromise) deliveryTripListenerPromise = (async () => {
+    await plugin.addListener("state", (value) => {
+      applyDeliveryTrip(value);
+      if (isDeliveryOnlyUser() && state.tab === "delivery") syncDeliveryLocationTracking();
+    });
+    await plugin.addListener("location", (location) => {
+      if (isDeliveryOnlyUser()) receiveDeliveryPosition(location, deliveryTrip.active);
+    });
+    await plugin.addListener("error", ({ message }) => updateDeliveryMapStatus(message));
+    await plugin.addListener("watchStopped", () => { deliveryNativeWatchActive = false; });
+  })();
+  await deliveryTripListenerPromise;
+  const saved = await plugin.getState();
+  if (saved.active && saved.userId === state.currentUserId) {
+    if (!state.deliveryRoute.length) {
+      state.deliveryRoute = saved.route;
+      state.deliveryRouteOrigin = state.deliveryLocation || BEBEU_STORE_LOCATION;
+    }
+    applyDeliveryTrip(saved);
+  } else if (saved.active) {
+    await plugin.command({ action: "stop" });
+  } else applyDeliveryTrip({ active: false });
+  if (state.tab === "delivery" && isDeliveryOnlyUser() && !deliveryTrip.active && !deliveryNativeWatchActive) {
+    deliveryNativeWatchActive = true;
+    try { await plugin.watchLocation(); }
+    catch (error) { deliveryNativeWatchActive = false; updateDeliveryMapStatus(error.message); }
+  }
+}
+
+async function startDeliveryTrip() {
+  if (!isDeliveryOnlyUser() || !isDeliveryRouteReady()) return;
+  const route = state.deliveryRoute.map((item) => ({
+    address: deliveryRouteAddress(item), latitude: Number(item.latitude), longitude: Number(item.longitude),
+    isStore: Boolean(item.isStore), orderId: item.orderId || "",
+  }));
+  try {
+    setGlobalLoading("배송 시작 중...");
+    const plugin = nativeDeliveryTripPlugin();
+    if (isNativeApp() && !plugin) throw new Error("배송지 알림을 사용하려면 최신 앱으로 업데이트해 주세요.");
+    if (plugin && !window.confirm("배송을 시작하면 화면이 꺼지거나 다른 앱을 사용해도 현재 위치가 베베유 관리자에게 전송됩니다. 종료를 누르면 백그라운드 위치 공유와 배송 알림이 중단됩니다. 시작할까요?")) return;
+    if (plugin) await plugin.start({ route, userId: state.currentUserId });
+    else applyDeliveryTrip({ active: true, index: 0, route, userId: state.currentUserId });
+    showToast(plugin ? "배송을 시작했습니다." : "배송을 시작했습니다. 휴대폰 알림은 Android 앱에서 제공됩니다.");
+  } catch (error) {
+    showToast(error.message || "배송을 시작하지 못했습니다.");
+  } finally { setGlobalLoading(""); }
+}
+
+async function changeDeliveryStop(action) {
+  if (!isDeliveryOnlyUser() || !deliveryTrip.active) return;
+  const plugin = nativeDeliveryTripPlugin();
+  if (plugin) { await plugin.command({ action }); return; }
+  const index = Math.max(0, Math.min(deliveryTrip.route.length - 1, deliveryTrip.index + (action === "next" ? 1 : -1)));
+  applyDeliveryTrip({ index });
+}
+
+async function stopDeliveryTrip() {
+  const plugin = nativeDeliveryTripPlugin();
+  if (plugin) await plugin.command({ action: "stop" });
+  applyDeliveryTrip({ active: false, index: 0, route: [], userId: "" });
+}
+
+function receiveDeliveryPosition(location, sentByNative = false) {
+  if (!Number.isFinite(Number(location?.latitude)) || !Number.isFinite(Number(location?.longitude))) return;
+  state.deliveryLocation = location;
+  updateCurrentDeliveryMarker(location);
+  const info = document.querySelector(".delivery-map-info");
+  if (info) {
+    info.querySelector("strong").textContent = "현재 위치";
+    info.querySelector("span").textContent = formatDeliveryCoordinates(location);
+  }
+  if (!deliveryInitialFocusDone) { deliveryInitialFocusDone = true; focusDeliveryMap(location); }
+  const now = Date.now();
+  if (!sentByNative && now - lastDeliveryLocationSaveAt >= 3000) {
+    lastDeliveryLocationSaveAt = now;
+    saveDeliveryLocation(location);
+  }
+}
 
 function deliveryJobs() {
   return Array.isArray(state.data?.deliveryJobs) ? state.data.deliveryJobs : [];
@@ -2454,7 +2619,7 @@ function renderDelivery() {
   const routeItems = state.deliveryRoute.length ? state.deliveryRoute : deliveryAddressLines(addresses).map((address) => ({ address }));
   const deliveryStopCount = routeItems.filter((item) => !item?.isStore).length;
   const routeReady = isDeliveryRouteReady();
-  const hasMapKey = Boolean(state.data?.mapSettings?.naverMapsEnabled);
+  const hasMapKey = Boolean(state.data?.mapSettings?.kakaoMapsEnabled);
   const savedDeliveryLocation = state.data?.deliveryLocation;
   const deliveryLocationLabel = savedDeliveryLocation && isAdminUser()
     ? `${savedDeliveryLocation.userName || "배송"} 위치: ${formatDeliveryLocationTime(savedDeliveryLocation.updatedAt)}`
@@ -2470,7 +2635,7 @@ function renderDelivery() {
       </div>
       ${renderDeliveryMap(hasMapKey)}
       ${deliveryLocationLabel ? `<p class="helper" id="deliveryWorkerLocationLabel">${escapeHtml(deliveryLocationLabel)}</p>` : `<p class="helper" id="deliveryWorkerLocationLabel" hidden></p>`}
-      ${hasMapKey ? "" : `<p class="helper">설정에서 네이버 지도 Client ID를 저장하면 실제 지도가 표시됩니다.</p>`}
+      ${hasMapKey ? "" : `<p class="helper">카카오 지도 서버 설정이 필요합니다.</p>`}
       <p class="helper delivery-map-status" id="deliveryMapStatus" ${state.deliveryMapMessage ? "" : "hidden"}>${escapeHtml(state.deliveryMapMessage || "")}</p>
       <div class="delivery-action-row">
         <button class="primary-button" type="button" id="deliveryLocateButton">현재 위치로 이동</button>
@@ -2481,7 +2646,7 @@ function renderDelivery() {
         <h3>주소 입력</h3>
         <span class="chip">한 줄에 한 곳</span>
       </div>
-      <textarea id="deliveryAddressInput" class="delivery-address-input" rows="8" placeholder="예) 광주 광산구 상무대로 ...">${escapeHtml(addresses)}</textarea>
+      <textarea id="deliveryAddressInput" class="delivery-address-input" rows="8" ${deliveryTrip.active ? "disabled" : ""} placeholder="예) 광주 광산구 상무대로 ...">${escapeHtml(addresses)}</textarea>
       <div class="delivery-add-row">
         <button class="secondary-button" type="button" id="deliveryOrderPickerButton">배송 추가</button>
         <span>${activeDeliveryJobs().length}건 배송 전</span>
@@ -2512,7 +2677,7 @@ function renderDelivery() {
             <li class="is-origin">
               <span>출발</span>
               <div class="delivery-route-static">
-                <strong>현재 위치</strong>
+                <strong>${state.deliveryRouteOrigin.isStore || state.deliveryRouteOrigin.address === "베베유 사무실" ? "베베유 사무실" : "현재 위치"}</strong>
                 <small>${escapeHtml(formatDeliveryCoordinates(state.deliveryRouteOrigin))}</small>
               </div>
             </li>
@@ -2543,69 +2708,27 @@ function renderDelivery() {
     ` : ""}
   `;
   initializeDeliveryMap();
-  requestDeliveryLocationOnce();
   syncDeliveryLocationTracking();
+  if (isDeliveryOnlyUser()) initializeDeliveryTrip().catch(() => {});
 }
 
 function renderDeliveryMap(hasMapKey = false) {
   const location = state.deliveryLocation;
   const locationText = location
     ? `현재 위치: ${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}`
-    : `${BEBEU_STORE_LOCATION.address} 기준으로 지도를 표시합니다. 위치 권한을 허용하면 현재 위치로 이동합니다.`;
+    : BEBEU_STORE_LOCATION.address;
   return `
     <div class="delivery-map-card ${hasMapKey ? "has-real-map" : ""}">
-      <div id="deliveryNaverMap" class="delivery-real-map" aria-label="배송 지도"></div>
+      ${hasMapKey ? `<iframe id="deliveryKakaoMap" class="delivery-real-map" title="카카오 배송 지도" src="${escapeHtml(serverUrl("/delivery-map.html"))}"></iframe>` : ""}
+      ${deliveryTripControls()}
       <div class="delivery-map-grid" aria-hidden="true"></div>
       <div class="delivery-map-pin" aria-hidden="true"></div>
       <div class="delivery-map-info">
-        <strong>현재 위치</strong>
+        <strong>${location ? "현재 위치" : "베베유 사무실"}</strong>
         <span>${escapeHtml(locationText)}</span>
       </div>
     </div>
   `;
-}
-
-function loadNaverMapScript() {
-  if (window.naver?.maps) return Promise.resolve();
-  if (naverMapScriptPromise) return naverMapScriptPromise;
-  const existing = document.querySelector("#naverMapScript");
-  if (existing) existing.remove();
-  naverMapScriptPromise = new Promise((resolve, reject) => {
-    let settled = false;
-    const script = document.createElement("script");
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      window.clearTimeout(timeoutId);
-      script.dataset.loadState = "ready";
-      resolve();
-    };
-    const fail = (message) => {
-      if (settled) return;
-      settled = true;
-      window.clearTimeout(timeoutId);
-      script.remove();
-      naverMapScriptPromise = null;
-      reject(new Error(message));
-    };
-    const timeoutId = window.setTimeout(() => {
-      fail("네이버 지도 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.");
-    }, 15000);
-    window.__BEBEU_NAVER_MAP_READY__ = () => {
-      if (window.naver?.maps) finish();
-      else fail("네이버 지도 API 초기화에 실패했습니다.");
-    };
-    script.id = "naverMapScript";
-    script.dataset.loadState = "loading";
-    script.src = serverUrl(`/api/naver-map.js?v=${encodeURIComponent(CUSTOMER_SHARE_CACHE_VERSION)}`);
-    script.async = true;
-    script.onload = () => {
-      if (window.naver?.maps) finish();
-    };
-    script.onerror = () => fail("네이버 지도 스크립트를 불러오지 못했습니다. 등록된 Web 서비스 URL을 확인해 주세요.");
-    document.head.appendChild(script);
-  });
-  return naverMapScriptPromise;
 }
 
 function updateDeliveryMapStatus(message = "") {
@@ -2616,118 +2739,59 @@ function updateDeliveryMapStatus(message = "") {
   status.hidden = !message;
 }
 
-function initializeDeliveryMap() {
-  const container = document.querySelector("#deliveryNaverMap");
-  if (!container || !state.data?.mapSettings?.naverMapsEnabled) return;
-  loadNaverMapScript().then(() => {
-    if (!document.body.contains(container)) return;
-    if (!window.naver?.maps) {
-      updateDeliveryMapStatus(window.__BEBEU_NAVER_MAP_ERROR__ || "네이버 지도 API가 로드되지 않았습니다. 네이버 클라우드의 Web 서비스 URL 설정을 확인해 주세요.");
-      return;
-    }
-    updateDeliveryMapStatus("");
-    const mapCard = container.closest(".delivery-map-card");
-    const storePosition = new naver.maps.LatLng(BEBEU_STORE_LOCATION.latitude, BEBEU_STORE_LOCATION.longitude);
-    const currentPosition = state.deliveryLocation
-      ? new naver.maps.LatLng(state.deliveryLocation.latitude, state.deliveryLocation.longitude)
-      : null;
-    const savedDeliveryLocation = state.data?.deliveryLocation;
-    const workerPosition = savedDeliveryLocation && isAdminUser()
-      ? new naver.maps.LatLng(savedDeliveryLocation.latitude, savedDeliveryLocation.longitude)
-      : null;
-    const map = new naver.maps.Map(container, {
-      center: currentPosition || workerPosition || storePosition,
-      zoom: currentPosition || workerPosition ? 15 : 14,
-      size: new naver.maps.Size(Math.max(container.clientWidth, 320), Math.max(container.clientHeight, 280)),
-      draggable: true,
-      pinchZoom: true,
-      scrollWheel: true,
-      disableDoubleTapZoom: false,
-      zoomControl: true,
-      zoomControlOptions: { position: naver.maps.Position.TOP_RIGHT },
-    });
-    deliveryMapInstance = map;
-    deliveryCurrentMarker = null;
-    deliveryWorkerMarker = null;
-    mapCard?.classList.add("is-map-ready");
-    const bounds = new naver.maps.LatLngBounds();
-    const markers = [];
-    let fittedMarkerCount = 0;
-    const addMarker = (position, titleText, className = "") => {
-      const marker = new naver.maps.Marker({
-        position,
-        map,
-        title: titleText,
-        icon: {
-          content: `<div class="delivery-naver-marker ${className}">${escapeHtml(titleText.slice(0, 2))}</div>`,
-          anchor: new naver.maps.Point(15, 15),
-        },
-      });
-      markers.push(marker);
-      bounds.extend(position);
-      fittedMarkerCount += 1;
-      return marker;
-    };
-    const routeIncludesStore = state.deliveryRoute.some((item) => item?.isStore);
-    if (!routeIncludesStore) addMarker(storePosition, "베베유", "is-store");
-    if (currentPosition) {
-      deliveryCurrentMarker = addMarker(currentPosition, "현재", "is-current");
-      map.setCenter(currentPosition);
-    }
-    if (workerPosition) {
-      deliveryWorkerMarker = addMarker(workerPosition, savedDeliveryLocation.userName || "배송", "is-worker");
-    }
-    const routePoints = state.deliveryRoute.filter((item) => item && typeof item === "object" && Number.isFinite(Number(item.latitude)) && Number.isFinite(Number(item.longitude)));
-    state.deliveryRoute.forEach((item, index) => {
-      const routePath = (Array.isArray(item?.pathFromPrevious) ? item.pathFromPrevious : [])
-        .filter((point) => Number.isFinite(Number(point?.latitude)) && Number.isFinite(Number(point?.longitude)));
-      if (routePath.length <= 1) return;
-      const linePath = routePath.map((point) => new naver.maps.LatLng(Number(point.latitude), Number(point.longitude)));
-      new naver.maps.Polyline({
-        map,
-        path: linePath,
-        strokeColor: "#124f46",
-        strokeOpacity: 0.95,
-        strokeWeight: 6,
-        strokeLineCap: "round",
-        strokeLineJoin: "round",
-        zIndex: 100,
-      });
-      linePath.forEach((position) => bounds.extend(position));
-    });
-    routePoints.forEach((item, index) => {
-      addMarker(
-        new naver.maps.LatLng(Number(item.latitude), Number(item.longitude)),
-        item.isStore ? "도착" : `${index + 1}`,
-        item.isStore ? "is-store" : ""
-      );
-    });
-    const addresses = routePoints.length ? [] : currentDeliveryRouteAddresses();
-    if (!window.naver.maps.Service?.geocode || !addresses.length) {
-      if (fittedMarkerCount > 1) map.fitBounds(bounds);
-      window.requestAnimationFrame(() => naver.maps.Event.trigger(map, "resize"));
-      return;
-    }
-    let pending = addresses.length;
-    addresses.forEach((address, index) => {
-      naver.maps.Service.geocode({ query: address }, (status, response) => {
-        pending -= 1;
-        if (status === naver.maps.Service.Status.OK) {
-          const item = response.v2.addresses?.[0];
-          if (item) {
-            addMarker(new naver.maps.LatLng(Number(item.y), Number(item.x)), `${index + 1}`);
-          }
-        }
-        if (pending === 0 && fittedMarkerCount > 1) {
-          map.fitBounds(bounds);
-          window.requestAnimationFrame(() => naver.maps.Event.trigger(map, "resize"));
-        }
-      });
-    });
-  }).catch((error) => {
-    updateDeliveryMapStatus(error.message || "네이버 지도를 불러오지 못했습니다. 네이버 클라우드의 Web 서비스 URL 설정을 확인해 주세요.");
-  });
+function postDeliveryMapState(fitRoute = false) {
+  const frame = document.querySelector("#deliveryKakaoMap");
+  if (!frame?.contentWindow) return;
+  frame.contentWindow.postMessage({
+    type: "bebeu-delivery-map-state",
+    origin: state.deliveryRouteOrigin,
+    route: state.deliveryRoute,
+    current: state.deliveryLocation,
+    worker: isAdminUser() ? state.data?.deliveryLocation : null,
+    activeIndex: deliveryTrip.active ? deliveryTrip.index : -1,
+    fitRoute,
+  }, new URL(serverUrl("/delivery-map.html")).origin);
 }
+
+function focusDeliveryMap(point) {
+  if (!point) return;
+  document.querySelector("#deliveryKakaoMap")?.contentWindow?.postMessage({
+    type: "bebeu-delivery-map-focus", point,
+  }, new URL(serverUrl("/delivery-map.html")).origin);
+}
+
+function postDeliveryMapPositions() {
+  document.querySelector("#deliveryKakaoMap")?.contentWindow?.postMessage({
+    type: "bebeu-delivery-map-positions",
+    current: state.deliveryLocation,
+    worker: isAdminUser() ? state.data?.deliveryLocation : null,
+  }, new URL(serverUrl("/delivery-map.html")).origin);
+}
+
+function initializeDeliveryMap() {
+  const frame = document.querySelector("#deliveryKakaoMap");
+  if (!frame || !state.data?.mapSettings?.kakaoMapsEnabled) return;
+  frame.addEventListener("load", () => {
+    if (!frame.isConnected) return;
+    postDeliveryMapState(state.deliveryRoute.length > 0);
+    if (isDeliveryOnlyUser() && state.deliveryLocation) focusDeliveryMap(state.deliveryLocation);
+  }, { once: true });
+}
+
+window.addEventListener("message", (event) => {
+  const frame = document.querySelector("#deliveryKakaoMap");
+  if (!frame || event.source !== frame.contentWindow
+    || event.origin !== new URL(serverUrl("/delivery-map.html")).origin) return;
+  if (event.data?.type === "bebeu-delivery-map-ready") {
+    frame.closest(".delivery-map-card")?.classList.add("is-map-ready");
+    updateDeliveryMapStatus("");
+    postDeliveryMapState(state.deliveryRoute.length > 0);
+    if (isDeliveryOnlyUser()) focusDeliveryMap(deliveryTrip.active ? deliveryTrip.route[deliveryTrip.index] : state.deliveryLocation);
+    else if (isAdminUser() && state.data?.deliveryLocation) focusDeliveryMap(state.data.deliveryLocation);
+  } else if (event.data?.type === "bebeu-delivery-map-error") {
+    updateDeliveryMapStatus(String(event.data.message || "카카오 지도를 표시하지 못했습니다."));
+  }
+});
 
 function deliveryAddressInputValue() {
   const liveInput = document.querySelector("#deliveryAddressInput");
@@ -2799,13 +2863,8 @@ function currentDeliveryRouteAddresses() {
   return route.map(deliveryRouteAddress).filter(Boolean);
 }
 
-function naverMapSearchUrl(address) {
-  return `https://map.naver.com/p/search/${encodeURIComponent(address)}`;
-}
-
-function naverMapRouteUrl(addresses) {
-  const query = addresses.join(" ");
-  return `https://map.naver.com/p/search/${encodeURIComponent(query)}`;
+function kakaoMapSearchUrl(address) {
+  return `https://map.kakao.com/link/search/${encodeURIComponent(address)}`;
 }
 
 function formatDeliveryLocationTime(value) {
@@ -2829,13 +2888,16 @@ function isDeliveryRouteReady() {
   return Boolean(last?.isStore && state.deliveryRoute.every((item) => Number.isFinite(Number(item?.latitude)) && Number.isFinite(Number(item?.longitude))));
 }
 
-function requestDeliveryLocationOnce() {
-  if (state.deliveryAutoLocateRequested || !navigator.geolocation) return;
-  state.deliveryAutoLocateRequested = true;
-  requestDeliveryLocation({ silent: true }).catch(() => {});
-}
-
 function requestDeliveryLocation(options = {}) {
+  const plugin = nativeDeliveryTripPlugin();
+  if (plugin && isDeliveryOnlyUser()) {
+    if (state.deliveryLocation) {
+      focusDeliveryMap(state.deliveryLocation);
+      return Promise.resolve(state.deliveryLocation);
+    }
+    startDeliveryWorkerTracking();
+    return Promise.reject(new Error("현재 위치를 확인하고 있습니다. 위치 서비스를 확인해 주세요."));
+  }
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) {
       const error = new Error("현재 위치를 사용할 수 없는 브라우저입니다.");
@@ -2848,7 +2910,10 @@ function requestDeliveryLocation(options = {}) {
       state.deliveryLocation = deliveryLocationFromPosition(position);
       saveDeliveryLocation(state.deliveryLocation);
       if (!options.silent) setGlobalLoading("");
-      if (options.render !== false) render();
+      updateCurrentDeliveryMarker(state.deliveryLocation);
+      const info = document.querySelector(".delivery-map-info span");
+      if (info) info.textContent = `현재 위치: ${formatDeliveryCoordinates(state.deliveryLocation)}`;
+      if (!options.silent) focusDeliveryMap(state.deliveryLocation);
       if (!options.silent) showToast("현재 위치를 확인했습니다.");
       resolve(state.deliveryLocation);
     }, (error) => {
@@ -2899,6 +2964,7 @@ function toggleDeliveryOrderSelection(orderId) {
 
 async function addSelectedDeliveryOrders() {
   if (!state.selectedDeliveryOrderIds.length) return;
+  await stopDeliveryTrip();
   try {
     setGlobalLoading("배송 항목 추가 중...");
     const result = await api("/api/delivery/jobs", {
@@ -2961,6 +3027,7 @@ async function completeDeliveryJob(orderId) {
 async function removeDeliveryJob(orderId) {
   const job = deliveryJobs().find((item) => item.orderId === orderId);
   if (!job) return;
+  await stopDeliveryTrip();
   try {
     setGlobalLoading("배송 목록 정리 중...");
     const remainingInput = deliveryAddressLines(deliveryAddressInputValue())
@@ -2984,6 +3051,7 @@ async function removeDeliveryJob(orderId) {
 }
 
 async function buildDeliveryRoute() {
+  await stopDeliveryTrip();
   const input = deliveryAddressInputValue();
   const addresses = deliveryAddressLines(input);
   localStorage.setItem(DELIVERY_ADDRESS_STORAGE_KEY, input);
@@ -2994,17 +3062,14 @@ async function buildDeliveryRoute() {
     return;
   }
   try {
-    if (!state.deliveryLocation) {
-      setGlobalLoading("출발할 현재 위치 확인 중...");
-      await requestDeliveryLocation({ silent: true, render: false });
-    }
-    setGlobalLoading("현위치부터 사무실까지 최적 동선 계산 중...");
+    const origin = state.deliveryLocation || { ...BEBEU_STORE_LOCATION, isStore: true };
+    setGlobalLoading("구·동별 배송 동선 계산 중...");
     await waitForPaint();
     const result = await api("/api/delivery/route", {
       method: "POST",
       body: JSON.stringify({
         addresses,
-        origin: state.deliveryLocation,
+        origin,
       }),
     });
     state.deliveryRoute = attachDeliveryJobsToRoute(result.route || []);
@@ -3015,13 +3080,13 @@ async function buildDeliveryRoute() {
     const failedText = result.failed?.length
       ? ` 좌표를 찾지 못한 항목 ${result.failed.length}개는 제외했습니다. 도로명만 입력한 경우 건물번호를 함께 입력해 주세요.`
       : "";
-    state.deliveryRouteMessage = `배송지를 동네별로 묶고 같은 동네의 가까운 지점을 이어서 계산했습니다. 마지막은 베베유 사무실입니다. 총 약 ${totalMinutes}분 · ${totalKm}km.${failedText}`;
+    state.deliveryRouteMessage = `구·동별 차량 이동시간 기준 동선입니다. 마지막은 베베유 사무실입니다. 총 약 ${totalMinutes}분 · ${totalKm}km.${failedText}`;
     render();
     showToast("동선을 만들었습니다.");
   } catch (error) {
     state.deliveryRoute = [];
     state.deliveryRouteOrigin = null;
-    state.deliveryRouteMessage = error.message || "네이버 경로 계산에 실패했습니다.";
+    state.deliveryRouteMessage = error.message || "카카오 경로 계산에 실패했습니다.";
     render();
   } finally {
     setGlobalLoading("");
@@ -3029,6 +3094,7 @@ async function buildDeliveryRoute() {
 }
 
 async function clearDeliveryRoute() {
+  await stopDeliveryTrip();
   try {
     setGlobalLoading("배송 목록 비우는 중...");
     const result = await api("/api/delivery/jobs", { method: "DELETE" });
@@ -3064,21 +3130,8 @@ function deliveryDistanceMeters(a, b) {
 }
 
 function updateCurrentDeliveryMarker(location) {
-  if (!deliveryMapInstance || !window.naver?.maps || !location) return;
-  const position = new naver.maps.LatLng(location.latitude, location.longitude);
-  if (deliveryCurrentMarker) {
-    deliveryCurrentMarker.setPosition(position);
-    return;
-  }
-  deliveryCurrentMarker = new naver.maps.Marker({
-    position,
-    map: deliveryMapInstance,
-    title: "현재 위치",
-    icon: {
-      content: `<div class="delivery-naver-marker is-current">현재</div>`,
-      anchor: new naver.maps.Point(15, 15),
-    },
-  });
+  if (!location) return;
+  postDeliveryMapPositions();
 }
 
 function updateDeliveryWorkerLocation(location) {
@@ -3089,25 +3142,16 @@ function updateDeliveryWorkerLocation(location) {
     label.textContent = `${location.userName || "배송"} 위치: ${formatDeliveryLocationTime(location.updatedAt)}`;
     label.hidden = false;
   }
-  if (!isAdminUser() || !deliveryMapInstance || !window.naver?.maps) return;
-  const position = new naver.maps.LatLng(Number(location.latitude), Number(location.longitude));
-  if (deliveryWorkerMarker) {
-    deliveryWorkerMarker.setPosition(position);
-    return;
+  if (isAdminUser()) postDeliveryMapPositions();
+  if (isAdminUser() && !deliveryWorkerFocusDone) {
+    deliveryWorkerFocusDone = true;
+    focusDeliveryMap(location);
   }
-  deliveryWorkerMarker = new naver.maps.Marker({
-    position,
-    map: deliveryMapInstance,
-    title: location.userName || "배송",
-    icon: {
-      content: `<div class="delivery-naver-marker is-worker">배송</div>`,
-      anchor: new naver.maps.Point(15, 15),
-    },
-  });
-  deliveryMapInstance.panTo(position);
 }
 
 function stopDeliveryWorkerTracking() {
+  if (deliveryNativeWatchActive) nativeDeliveryTripPlugin()?.stopWatch().catch(() => {});
+  deliveryNativeWatchActive = false;
   if (deliveryWorkerLocationWatchId !== null && navigator.geolocation) {
     navigator.geolocation.clearWatch(deliveryWorkerLocationWatchId);
   }
@@ -3178,22 +3222,23 @@ async function startDeliveryLocationStream() {
 }
 
 function startDeliveryWorkerTracking() {
+  const plugin = nativeDeliveryTripPlugin();
+  if (plugin) {
+    if (deliveryTrip.active || deliveryNativeWatchActive) return;
+    deliveryNativeWatchActive = true;
+    initializeDeliveryTrip().then(() => plugin.watchLocation()).catch((error) => {
+      deliveryNativeWatchActive = false;
+      updateDeliveryMapStatus(error.message || "위치 권한을 확인해 주세요.");
+    });
+    return;
+  }
   if (deliveryWorkerLocationWatchId !== null || !navigator.geolocation) return;
   deliveryWorkerLocationWatchId = navigator.geolocation.watchPosition((position) => {
     if (state.tab !== "delivery" || !isDeliveryOnlyUser()) {
       stopDeliveryWorkerTracking();
       return;
     }
-    const location = deliveryLocationFromPosition(position);
-    state.deliveryLocation = location;
-    updateCurrentDeliveryMarker(location);
-    const now = Date.now();
-    const movedMeters = lastDeliveryLocationSent ? deliveryDistanceMeters(lastDeliveryLocationSent, location) : Infinity;
-    if (now - lastDeliveryLocationSaveAt >= 1000 && (movedMeters >= 2 || now - lastDeliveryLocationSaveAt >= 8000)) {
-      lastDeliveryLocationSaveAt = now;
-      lastDeliveryLocationSent = location;
-      saveDeliveryLocation(location);
-    }
+    receiveDeliveryPosition(deliveryLocationFromPosition(position));
   }, (error) => {
     updateDeliveryMapStatus(error.message || "배송 기사 위치를 확인하지 못했습니다.");
   }, {
@@ -3248,7 +3293,11 @@ async function copyDeliveryRoute() {
   if (!isDeliveryRouteReady()) return;
   const text = deliveryRouteCopyText();
   try {
-    await navigator.clipboard.writeText(text);
+    if (isNativeApp() && window.Capacitor?.Plugins?.Clipboard?.write) {
+      await window.Capacitor.Plugins.Clipboard.write({ string: text });
+    } else {
+      await navigator.clipboard.writeText(text);
+    }
   } catch {
     const textarea = document.createElement("textarea");
     textarea.value = text;
@@ -3256,8 +3305,9 @@ async function copyDeliveryRoute() {
     textarea.style.opacity = "0";
     document.body.appendChild(textarea);
     textarea.select();
-    document.execCommand("copy");
+    const copied = document.execCommand("copy");
     textarea.remove();
+    if (!copied) { showToast("복사하지 못했습니다. 앱을 업데이트해주세요."); return; }
   }
   showToast("배송 동선을 복사했습니다.");
 }
@@ -3291,6 +3341,7 @@ async function rebuildDeliveryRouteInOrder(addresses, previousRoute) {
 }
 
 function reorderDeliveryRoute(fromIndex, toIndex) {
+  if (deliveryTrip.active) { showToast("배송을 종료한 뒤 순서를 변경해 주세요."); return; }
   if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0) return;
   const previousRoute = [...state.deliveryRoute];
   const stops = state.deliveryRoute.filter((item) => !item?.isStore);
@@ -3904,12 +3955,15 @@ function renderRecentPhotoStrip(order, maxCount = 5, includeAddButton = false) {
   if (!photos.length && !includeAddButton) return "";
   return `
     <div class="order-recent-photos ${includeAddButton ? "has-add-button" : ""}" aria-label="최근 업로드 사진">
-      ${includeAddButton ? `<span class="order-recent-photo-add" role="button" tabindex="0" data-list-photo-add="${escapeHtml(order.id)}" aria-label="사진 빠른 추가">+</span>` : ""}
+      ${includeAddButton ? `<button class="order-recent-photo-add" type="button" data-list-photo-add="${escapeHtml(order.id)}" aria-label="사진 빠른 추가" title="사진 추가">+</button>` : ""}
       <span class="order-recent-photo-track" style="--recent-visible-count:${Math.max(1, Number(maxCount) || 5)}">
         ${photos.map((photo) => {
           const isVideo = (photo.mimeType || "").startsWith("video/");
           const src = mediaDisplayUrl(photo);
-          return `<i>${isVideo ? `<video src="${serverAssetUrl(photo.url)}" preload="metadata" muted playsinline></video>` : `<img src="${src}" alt="최근 업로드 사진" loading="lazy" decoding="async">`}</i>`;
+          const media = isVideo ? `<video src="${serverAssetUrl(photo.url)}" preload="metadata" muted playsinline></video>` : `<img src="${src}" alt="최근 업로드 사진" loading="lazy" decoding="async">`;
+          return includeAddButton
+            ? `<button class="order-recent-photo-item" type="button" data-order="${escapeHtml(order.id)}" aria-label="작업 사진 열기">${media}</button>`
+            : `<i>${media}</i>`;
         }).join("")}
       </span>
     </div>
@@ -4242,6 +4296,7 @@ function renderOrderCard(order) {
         <button class="order-card-open" type="button" data-order="${order.id}">
           ${renderOrderTitleBlock(order)}
         </button>
+        ${state.tab === "work" ? renderRecentPhotoStrip(order, 5, true) : ""}
         ${doneQuickShareActions}
         ${cardActions}
         ${quickActions}
@@ -4268,8 +4323,9 @@ function renderOrderCard(order) {
             ${renderPickupPreview(order)}
           </span>
         </div>
-        ${renderRecentPhotoStrip(order, 5, state.tab === "work")}
+        ${state.tab !== "work" ? renderRecentPhotoStrip(order, 5) : ""}
       </button>
+      ${state.tab === "work" ? renderRecentPhotoStrip(order, 5, true) : ""}
       ${doneQuickShareActions}
       ${state.tab === "work" ? `<button class="quick-complete-action" type="button" data-quick-complete="${escapeHtml(order.id)}">완료</button>` : ""}
       ${cardActions}
@@ -4318,7 +4374,7 @@ function renderDetail() {
       ${renderDetailPhotoSpecialNotice(importantMemo)}
       ${renderDetailTaskBars(order)}
       <div class="detail-photo-lanes">
-        ${pinnedSelectedPhotos.length ? `<div class="photo-strip is-pinned-strip">
+        ${pinnedSelectedPhotos.length ? `<div class="photo-strip is-pinned-strip ${photoGridClass()}" aria-label="고정 사진">
           ${pinnedSelectedPhotos.map(renderPhotoCard).join("")}
         </div>` : ""}
         ${regularSelectedPhotos.length || state.selectedStep !== "all" ? `<div class="photo-strip is-regular-strip ${photoGridClass()}">
@@ -4414,7 +4470,7 @@ function renderCompletedPhotoBoard(order, stepRows) {
                 <span>${photos.length}장</span>
               </div>
               <div class="completed-photo-lanes">
-                ${pinnedPhotos.length ? `<div class="completed-photo-grid is-pinned-grid">
+                ${pinnedPhotos.length ? `<div class="completed-photo-grid is-pinned-grid ${photoGridClass()}" aria-label="고정 사진">
                   ${pinnedPhotos.map(renderCompletedPhotoCard).join("")}
                 </div>` : ""}
                 <div class="completed-photo-grid is-regular-grid ${photoGridClass()}">
@@ -4755,7 +4811,7 @@ function renderNaverCafeSetting() {
           <span>카페 API</span>
           <strong>${settings.hasClientId && settings.hasClientSecret && settings.hasClubId && settings.hasMenuId ? "서버 설정 완료" : "서버 설정 필요"}</strong>
         </div>
-        <a class="primary-button naver-connect-button" href="${escapeHtml(settings.connectPath || "/api/naver-cafe/connect")}">네이버 계정 연결</a>
+        <a class="primary-button naver-connect-button" href="${escapeHtml(serverUrl(settings.connectPath || "/api/naver-cafe/connect"))}">네이버 계정 연결</a>
         <button class="secondary-button" type="button" data-naver-cafe-automation-login>자동화 로그인 열기</button>
         <label>글 제목 형식
           <input name="titleTemplate" type="text" autocomplete="off" value="${escapeHtml(settings.titleTemplate || "광주 {productName} 세탁 베베유")}">
@@ -5064,8 +5120,8 @@ function renderMapSetting() {
   const settings = state.data?.mapSettings || {};
   return `
     <div class="api-managed-status">
-      <span>네이버 지도 API</span>
-      <strong>${settings.naverMapsEnabled ? "서버 설정 완료" : "서버 설정 필요"}</strong>
+      <span>배송 지도</span>
+      <strong>${settings.kakaoMapsEnabled && settings.kakaoRoutesEnabled ? "서버 설정 완료" : "서버 설정 필요"}</strong>
     </div>
   `;
 }
@@ -5073,6 +5129,13 @@ function renderMapSetting() {
 async function handleClick(event) {
 
 // ===== 60-events-actions.js =====
+  const externalLink = event.target.closest("a.naver-connect-button");
+  if (externalLink && isNativeApp()) {
+    event.preventDefault();
+    try { await openExternalUrl(externalLink.href); }
+    catch (error) { showToast(error.message); }
+    return;
+  }
   const listPhotoAddTarget = event.target.closest("[data-list-photo-add]");
   if (listPhotoAddTarget) {
     event.preventDefault();
@@ -5332,7 +5395,21 @@ async function handleClick(event) {
   }
 
   if (target.id === "deliveryLocateButton") {
-    requestDeliveryLocation();
+    requestDeliveryLocation().catch((error) => showToast(error.message));
+    return;
+  }
+
+  if (target.id === "deliveryStartButton") {
+    await startDeliveryTrip();
+    return;
+  }
+  if (target.id === "deliveryPreviousButton" || target.id === "deliveryNextButton") {
+    await changeDeliveryStop(target.id === "deliveryNextButton" ? "next" : "previous");
+    return;
+  }
+  if (target.id === "deliveryEndButton") {
+    await stopDeliveryTrip();
+    showToast("배송을 종료했습니다.");
     return;
   }
 
@@ -5389,7 +5466,7 @@ async function handleClick(event) {
   }
 
   if (target.dataset.openDeliveryAddress) {
-    window.open(naverMapSearchUrl(target.dataset.openDeliveryAddress), "_blank", "noopener");
+    await openExternalUrl(kakaoMapSearchUrl(target.dataset.openDeliveryAddress));
     return;
   }
 
@@ -5715,6 +5792,12 @@ async function handleClick(event) {
     orderDialog.showModal();
   }
   if (target.id === "logoutButton") {
+    await stopDeliveryTrip();
+    stopDeliveryWorkerTracking();
+    deliveryInitialFocusDone = false;
+    state.deliveryLocation = null;
+    state.deliveryRoute = [];
+    state.deliveryRouteOrigin = null;
     localStorage.removeItem("bebeu.currentUserId");
     localStorage.removeItem(VIEW_STATE_KEY);
     state.currentUserId = "";
@@ -5929,10 +6012,37 @@ async function batchShareOrders(target) {
 }
 
 async function shareDirectly({ text }) {
+  if (isNativeApp()) {
+    const share = window.Capacitor?.Plugins?.Share;
+    if (!share?.share) throw new Error("공유 기능이 포함된 최신 앱으로 업데이트해주세요.");
+    try {
+      await share.share({ text, dialogTitle: "전송할 앱 선택" });
+    } catch (error) {
+      if (/cancel|dismiss|취소/i.test(error.message || "")) {
+        const cancelled = new Error("공유가 취소되었습니다.");
+        cancelled.name = "AbortError";
+        throw cancelled;
+      }
+      throw error;
+    }
+    return;
+  }
   if (!navigator.share) {
     throw new Error("이 브라우저에서는 공유 선택창을 열 수 없습니다. 다른 브라우저 또는 홈 화면 앱에서 다시 시도해주세요.");
   }
   await navigator.share({ text });
+}
+
+async function openExternalUrl(url) {
+  const absoluteUrl = new URL(url, `${configuredServerBase()}/`).toString();
+  if (!/^https?:\/\//i.test(absoluteUrl)) throw new Error("지원하지 않는 주소입니다.");
+  if (isNativeApp()) {
+    const browser = window.Capacitor?.Plugins?.Browser;
+    if (!browser?.open) throw new Error("외부 페이지 기능이 포함된 최신 앱으로 업데이트해주세요.");
+    await browser.open({ url: absoluteUrl });
+    return;
+  }
+  window.open(absoluteUrl, "_blank", "noopener");
 }
 
 async function postOrderToNaverCafe(orderId) {
@@ -6552,6 +6662,7 @@ function refreshPhotoSelectionUi() {
 }
 
 function clearPhotoSelection() {
+  state.photoPressStart = null;
   state.selectedPhotoIds = [];
   state.photoSelectionMode = false;
   state.photoDragSelection = null;
@@ -6609,6 +6720,7 @@ function handlePhotoPointerDown(event) {
   const card = event.target.closest("[data-photo-card]");
   if (!card || event.target.closest("button")) return;
   if (state.photoSelectionMode) {
+    if (card.closest(".is-pinned-strip, .is-pinned-grid")) return;
     event.preventDefault();
     event.stopPropagation();
     const selected = state.selectedPhotoIds.includes(card.dataset.photoCard);
@@ -6624,6 +6736,7 @@ function handlePhotoPointerDown(event) {
     return;
   }
   clearTimeout(state.photoPressTimer);
+  state.photoPressStart = { x: event.clientX, y: event.clientY, pointerId: event.pointerId };
   state.photoPressTimer = setTimeout(async () => {
     state.suppressPhotoTap = true;
     if (isCompletedDetail()) togglePhotoSelection(card.dataset.photoCard);
@@ -6633,6 +6746,7 @@ function handlePhotoPointerDown(event) {
 }
 
 function handlePhotoPointerEnd() {
+  state.photoPressStart = null;
   clearTimeout(state.photoPressTimer);
   state.photoPressTimer = null;
   state.photoDragSelection = null;
@@ -6785,6 +6899,12 @@ function clamp(value, min, max) {
 }
 
 function handlePhotoPointerMove(event) {
+  const start = state.photoPressStart;
+  if (start && start.pointerId === event.pointerId && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 8) {
+    clearTimeout(state.photoPressTimer);
+    state.photoPressTimer = null;
+    state.photoPressStart = null;
+  }
   if (!state.photoDragSelection || !state.photoSelectionMode) return;
   if (state.photoDragSelection.pointerId !== undefined && state.photoDragSelection.pointerId !== event.pointerId) return;
   event.preventDefault();
@@ -6938,6 +7058,14 @@ function openEditOrderDialog() {
 
 const uploadReadyImages = new WeakSet();
 
+async function readyUploadFile(media) {
+  if (media.filePromise) await media.filePromise;
+  if (media.fileError) throw media.fileError;
+  const file = media.displayFile || media.file;
+  if (!file) throw new Error("사진을 준비하지 못했습니다. 다시 선택해 주세요.");
+  return file;
+}
+
 async function receiveDroppedPhotos(files, x, y) {
   if (!state.data || !files.length) return;
   if (photoDialog.open) {
@@ -6949,6 +7077,7 @@ async function receiveDroppedPhotos(files, x, y) {
     await addChatFiles(files);
     return;
   }
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
   const card = document.elementFromPoint(x, y)?.closest("[data-order-card-id]");
   if (card && ["work", "done"].includes(state.tab)) {
     openListPhotoStepPicker(card.dataset.orderCardId, files);
@@ -6968,9 +7097,14 @@ document.addEventListener("drop", (event) => {
 });
 window.addEventListener("bebeuPhotoDrop", async (event) => {
   try {
-    const photos = event.detail?.photos || [];
+    // Capacitor triggerJSEvent puts data on the Event itself, not detail.
+    const payload = event.detail && typeof event.detail === "object" ? event.detail : event;
+    const photos = Array.isArray(payload.photos) ? payload.photos : [];
+    if (!photos.length) return;
+    const x = Number(payload.x);
+    const y = Number(payload.y);
     const files = await Promise.all(photos.map((photo, index) => nativePhotoFile(photo, index, "drop")));
-    await receiveDroppedPhotos(files, event.detail.x, event.detail.y);
+    await receiveDroppedPhotos(files, x, y);
   } catch (error) {
     alert(error.message || "드래그한 사진을 읽지 못했습니다.");
   }
@@ -7057,17 +7191,39 @@ async function pickNativeGalleryPhotos() {
   try {
     const result = await camera.pickImages({ quality: 72, width: 1400, height: 1400, limit: availableCount });
     const photos = Array.from(result.photos || []).slice(0, availableCount);
-    const files = new Array(photos.length);
+    const selected = photos.map((photo, index) => ({
+      file: null,
+      displayFile: null,
+      previewUrl: photo.webPath || window.Capacitor.convertFileSrc(photo.path),
+      originalName: `gallery_${Date.now()}_${index + 1}.jpg`,
+      mimeType: "image/jpeg",
+      isVideo: false,
+      sourceLabel: "갤러리",
+      nativePreview: true,
+    }));
+    state.pendingPhotos.push(...selected);
+    renderPendingPhotos("갤러리");
     let nextPhoto = 0;
-    await Promise.all(Array.from({ length: Math.min(2, photos.length) }, async () => {
+    const jobs = new Array(photos.length);
+    const resolvers = selected.map((media, index) => {
+      media.filePromise = new Promise((resolve) => { jobs[index] = resolve; });
+      return jobs[index];
+    });
+    Promise.all(Array.from({ length: Math.min(2, photos.length) }, async () => {
       while (nextPhoto < photos.length) {
         const index = nextPhoto++;
-        const file = await nativePhotoFile(photos[index], index, "gallery");
-        uploadReadyImages.add(file);
-        files[index] = file;
+        try {
+          const file = await nativePhotoFile(photos[index], index, "gallery");
+          uploadReadyImages.add(file);
+          selected[index].file = file;
+          selected[index].displayFile = file;
+        } catch (error) {
+          selected[index].fileError = error;
+        } finally {
+          resolvers[index]();
+        }
       }
-    }));
-    await handleSelectedFiles(files, "갤러리");
+    })).catch(() => {});
   } catch (error) {
     if (!/cancel/i.test(String(error?.message || error))) throw error;
   }
@@ -7379,7 +7535,7 @@ function renderPendingPhotos(sourceLabel) {
       ${state.pendingPhotos.map((item, index) => `
         <article class="preview-item">
           <button class="preview-delete-button" type="button" data-remove-pending-photo="${index}" aria-label="선택한 사진 제거">×</button>
-          ${item.isVideo ? `<video src="${item.previewUrl}" controls playsinline preload="metadata"></video>` : `<img src="${item.previewUrl}" alt="사진 미리보기">`}
+          ${item.isVideo ? `<video src="${item.previewUrl}" controls playsinline preload="metadata"></video>` : `<img src="${item.previewUrl}" alt="사진 미리보기" loading="lazy" decoding="async">`}
           <span>${escapeHtml(item.originalName)}</span>
         </article>
       `).join("")}
@@ -7389,7 +7545,7 @@ function renderPendingPhotos(sourceLabel) {
 
 function removePendingPhoto(index) {
   const [removed] = state.pendingPhotos.splice(index, 1);
-  if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+  if (removed?.previewUrl && !removed.nativePreview) URL.revokeObjectURL(removed.previewUrl);
   if (!state.pendingPhotos.length) {
     photoPreview.innerHTML = `<div class="preview-empty">사진 찍기 또는 갤러리를 선택해주세요.</div>`;
     cameraInput.value = "";
@@ -7401,7 +7557,7 @@ function removePendingPhoto(index) {
 
 function releasePendingPhotos() {
   state.pendingPhotos.forEach((item) => {
-    if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+    if (item.previewUrl && !item.nativePreview) URL.revokeObjectURL(item.previewUrl);
   });
   state.pendingPhotos = [];
 }
@@ -8481,6 +8637,7 @@ content.addEventListener("submit", async (event) => {
 
 content.addEventListener("input", (event) => {
   if (event.target.id === "deliveryAddressInput") {
+    if (deliveryTrip.active) return;
     localStorage.setItem(DELIVERY_ADDRESS_STORAGE_KEY, event.target.value);
     state.deliveryRoute = [];
     state.deliveryRouteOrigin = null;
@@ -8753,6 +8910,57 @@ if (isNativeApp()) {
     history.back();
   });
   nativeBackListener?.catch?.(() => {});
+}
+
+let appUpdateCheckRunning = false;
+let appUpdatePromptedVersion = 0;
+
+async function checkNativeAppUpdate() {
+  const app = nativeAppPlugin();
+  if (!app?.getInfo || appUpdateCheckRunning || document.visibilityState === "hidden") return;
+  if (document.querySelector("dialog[open]") || state.loadingMessage || state.savingPhoto || state.savingOrder) return;
+  appUpdateCheckRunning = true;
+  try {
+    const [installed, response] = await Promise.all([
+      app.getInfo(),
+      fetch(serverUrl(`/app-release.json?t=${Date.now()}`), { cache: "no-store" }),
+    ]);
+    if (!response.ok) return;
+    const release = await response.json();
+    const latestCode = Number(release.versionCode);
+    const installedCode = Number(installed.build);
+    if (!Number.isSafeInteger(latestCode) || !Number.isSafeInteger(installedCode)
+      || latestCode <= installedCode || latestCode === appUpdatePromptedVersion) return;
+    if (document.querySelector("dialog[open]") || state.loadingMessage || state.savingPhoto || state.savingOrder) return;
+    appUpdatePromptedVersion = latestCode;
+    if (confirm(`업데이트가 있습니다.\n새 버전 ${String(release.versionName || latestCode)}을 설치하시겠습니까?`)) {
+      // Keep the destination fixed instead of trusting a URL from release metadata.
+      const store = window.Capacitor?.Plugins?.StoreUpdate;
+      if (store?.openStore) await store.openStore();
+      else window.open("https://play.google.com/store/apps/details?id=cloud.bebeu.work", "_system");
+    }
+  } catch {
+    // Offline checks must not interrupt normal app usage.
+  } finally {
+    appUpdateCheckRunning = false;
+  }
+}
+
+if (isNativeApp()) {
+  checkNativeAppUpdate();
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      checkNativeAppUpdate();
+      if (isDeliveryOnlyUser()) initializeDeliveryTrip().catch(() => {});
+    }
+  });
+  nativeAppPlugin()?.addListener?.("appStateChange", ({ isActive }) => {
+    if (isActive) {
+      checkNativeAppUpdate();
+      if (isDeliveryOnlyUser()) initializeDeliveryTrip().catch(() => {});
+    }
+  })?.catch?.(() => {});
+  setInterval(checkNativeAppUpdate, 60000);
 }
 
 if (!isNativeApp() && "serviceWorker" in navigator) {
