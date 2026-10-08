@@ -8,7 +8,7 @@
 공통으로 유지되는 항목:
 
 - DB: MariaDB `bebeu`
-- 사진 저장 위치: `C:\bebeyu\bebeu_image`
-- 로그 저장 위치: `C:\bebeyu\logs`
+- 사진 저장 위치: `D:\bebeyu\bebeu_image`
+- 로그 저장 위치: `D:\bebeyu\logs`
 
 각 버전은 해당 폴더 안의 `start-bebeu.bat` 또는 `start-bebeu.ps1`로 실행할 수 있습니다.

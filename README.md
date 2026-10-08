@@ -46,6 +46,10 @@
 
 `bebeu/v2`에는 Capacitor 설정이 있으며, `main`에 푸시하면 GitHub Actions의 macOS 환경에서 iOS 시뮬레이터 빌드를 검사합니다. 이 검사는 서명되지 않은 빌드로, App Store에 제출하는 IPA는 아닙니다. 자세한 내용은 [네이티브 빌드 안내](docs/native-build.md)를 참고하세요.
 
+## Android 빌드 준비
+
+Android 프로젝트는 `bebeu/v2/android`에 있습니다. D: 외장 드라이브에서의 동기화, 서명 AAB 생성, Play Console 제출 전 점검 사항은 [Android 배포 안내](docs/android-release.md)를 참고하세요.
+
 ## 기술 스택
 
 - Frontend: Vanilla JavaScript, HTML, CSS, PWA Service Worker
@@ -59,7 +63,7 @@
 ## 폴더 구조
 
 ```text
-C:\bebeyu
+D:\bebeyu
 ├─ bebeu
 │  ├─ v1                 # 이전 버전 보관
 │  └─ v2                 # 현재 운영 버전
@@ -78,7 +82,7 @@ C:\bebeyu
 ## 실행 방법
 
 ```powershell
-cd C:\bebeyu\bebeu\v2
+cd D:\bebeyu\bebeu\v2
 npm install
 copy .env.example .env
 npm start

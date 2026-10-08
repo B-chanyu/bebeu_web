@@ -2,7 +2,7 @@
 setlocal
 title bebeu server
 
-set "APP_DIR=C:\bebeyu"
+set "APP_DIR=D:\bebeyu"
 set "V2_DIR=%APP_DIR%\bebeu\v2"
 set "PHOTO_ROOT=%APP_DIR%\bebeu_image"
 set "LOG_DIR=%APP_DIR%\app_logs"

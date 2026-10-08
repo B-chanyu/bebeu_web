@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-set "APP_DIR=C:\bebeyu"
+set "APP_DIR=D:\bebeyu"
 set "SOURCE=%APP_DIR%\start-bebeu.bat"
 set "DESKTOP=%USERPROFILE%\OneDrive\Desktop"
 

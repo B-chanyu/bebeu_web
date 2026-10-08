@@ -2,7 +2,7 @@
 setlocal
 title bebeu server
 
-set "DATA_ROOT=C:\bebeyu"
+set "DATA_ROOT=D:\bebeyu"
 set "APP_DIR=%DATA_ROOT%\bebeu\v2"
 cd /d "%APP_DIR%"
 

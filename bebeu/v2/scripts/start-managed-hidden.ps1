@@ -1,7 +1,8 @@
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
-$logRoot = if ($env:LOG_DIR) { $env:LOG_DIR } else { "C:\bebeyu\app_logs" }
+$dataRoot = Split-Path -Parent (Split-Path -Parent $root)
+$logRoot = if ($env:LOG_DIR) { $env:LOG_DIR } else { Join-Path $dataRoot "app_logs" }
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 
 $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
