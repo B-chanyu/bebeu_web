@@ -2265,9 +2265,11 @@ textarea {
 
 .order-recent-photos {
   --recent-photo-gap: 4px;
-  --recent-photo-size: calc((100% - (var(--recent-photo-gap) * 5)) / 6);
-  display: block;
-  width: min(92%, 480px);
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  align-items: start;
+  gap: var(--recent-photo-gap);
+  width: min(calc(100% - 22px), 480px);
   margin: 18px 0 0 22px;
   padding: 0 0 4px 0;
   overflow: visible;
@@ -2276,7 +2278,7 @@ textarea {
   scrollbar-width: none;
   -webkit-overflow-scrolling: auto;
   position: relative;
-  min-height: calc(var(--recent-photo-size) + 4px);
+  min-height: 0;
 }
 
 .order-recent-photos::-webkit-scrollbar,
@@ -2287,19 +2289,21 @@ textarea {
 .order-recent-photo-add {
   display: grid;
   place-items: center;
-  position: absolute;
-  top: 0;
-  left: 0;
+  position: relative;
+  grid-column: 1;
   z-index: 2;
-  width: var(--recent-photo-size);
-  height: var(--recent-photo-size);
+  width: 100%;
+  height: auto;
   flex: none;
   min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
   box-sizing: border-box;
-  border-radius: 0;
+  border-radius: 6px;
   color: #fff;
   background: #d5a94b;
-  font-size: 28px;
+  font-size: 0;
   font-weight: 950;
   line-height: 1;
   aspect-ratio: 1 / 1;
@@ -2307,12 +2311,38 @@ textarea {
   user-select: none;
 }
 
+.order-recent-photo-add::before,
+.order-recent-photo-add::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 44%;
+  max-width: 24px;
+  height: 3px;
+  border-radius: 2px;
+  background: currentColor;
+  transform: translate(-50%, -50%);
+}
+
+.order-recent-photo-add::after {
+  transform: translate(-50%, -50%) rotate(90deg);
+}
+
+.order-recent-photo-add:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
 .order-recent-photo-track {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--recent-photo-gap);
+  grid-column: 1 / -1;
+  min-width: 0;
   width: 100%;
-  min-height: calc(var(--recent-photo-size) + 4px);
+  min-height: 0;
+  border: 0;
   padding: 0 0 4px 0;
   overflow-x: auto;
   overflow-y: hidden;
@@ -2324,16 +2354,23 @@ textarea {
 }
 
 .order-recent-photos.has-add-button .order-recent-photo-track {
-  width: calc(100% - var(--recent-photo-size) - var(--recent-photo-gap));
-  margin-left: calc(var(--recent-photo-size) + var(--recent-photo-gap));
+  grid-column: 2 / -1;
+  width: 100%;
+  margin-left: 0;
 }
 
-.order-recent-photo-track i {
+.order-recent-photo-track i,
+.order-recent-photo-track .order-recent-photo-item {
   display: block;
-  flex: 0 0 var(--recent-photo-size);
-  width: var(--recent-photo-size);
-  height: var(--recent-photo-size);
+  flex: 0 0 calc((100% - (var(--recent-photo-gap) * (var(--recent-visible-count) - 1))) / var(--recent-visible-count));
+  width: calc((100% - (var(--recent-photo-gap) * (var(--recent-visible-count) - 1))) / var(--recent-visible-count));
+  height: auto;
+  aspect-ratio: 1 / 1;
   min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
   overflow: hidden;
   background: #cfcfcf;
   font-style: normal;
@@ -2623,22 +2660,34 @@ textarea {
 
 .detail-photo-lanes {
   --photo-lane-gap: 7px;
-  --regular-photo-size: clamp(92px, 29vw, 150px);
-  --large-pinned-photo-size: calc(var(--regular-photo-size) + var(--regular-photo-size) + var(--regular-photo-size) + var(--photo-lane-gap) + var(--photo-lane-gap));
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  max-width: 100%;
   gap: 10px;
 }
 
 .photo-strip.is-pinned-strip {
-  display: flex;
-  flex-flow: row nowrap;
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: none;
+  grid-auto-flow: column;
+  grid-auto-columns: calc((100% - (var(--photo-lane-gap) * (var(--photo-columns, 3) - 1))) / var(--photo-columns, 3));
+  align-items: start;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-x pan-y;
   gap: var(--photo-lane-gap);
   scroll-snap-type: x mandatory;
   padding-bottom: 4px;
 }
 
 .photo-strip.is-regular-strip {
+  min-width: 0;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   grid-auto-rows: auto;
   gap: var(--photo-lane-gap);
@@ -2707,6 +2756,10 @@ textarea {
   opacity: 0.45;
 }
 
+.photo-grid-cols-1 { --photo-columns: 1; }
+.photo-grid-cols-2 { --photo-columns: 2; }
+.photo-grid-cols-3 { --photo-columns: 3; }
+
 .photo-strip.is-regular-strip.photo-grid-cols-1,
 .completed-photo-grid.is-regular-grid.photo-grid-cols-1 {
   grid-template-columns: minmax(0, 1fr);
@@ -2723,10 +2776,10 @@ textarea {
 }
 
 .photo-strip.is-pinned-strip .photo-card {
-  flex: 0 0 var(--large-pinned-photo-size);
-  width: var(--large-pinned-photo-size);
-  min-width: var(--large-pinned-photo-size);
-  height: var(--large-pinned-photo-size);
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  aspect-ratio: 1 / 1;
   scroll-snap-align: start;
   scroll-snap-stop: always;
 }
@@ -2769,6 +2822,14 @@ body.is-photo-selection-mode .completed-photo-card {
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
+}
+
+body.is-photo-selection-mode .detail-photo-lanes,
+body.is-photo-selection-mode .photo-strip.is-pinned-strip,
+body.is-photo-selection-mode .photo-strip.is-pinned-strip .photo-card,
+body.is-photo-selection-mode .completed-photo-grid.is-pinned-grid,
+body.is-photo-selection-mode .completed-photo-grid.is-pinned-grid .completed-photo-card {
+  touch-action: pan-x pan-y;
 }
 
 .photo-card.is-selected {
@@ -2979,9 +3040,10 @@ body.is-photo-selection-mode .completed-photo-card {
 
 .completed-photo-lanes {
   --completed-gap: 7px;
-  --regular-photo-size: clamp(92px, 29vw, 150px);
-  --pinned-photo-size: calc(var(--regular-photo-size) + var(--regular-photo-size) + var(--regular-photo-size) + var(--completed-gap) + var(--completed-gap));
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  max-width: 100%;
   gap: 12px;
 }
 
@@ -2995,9 +3057,20 @@ body.is-photo-selection-mode .completed-photo-card {
 }
 
 .completed-photo-grid.is-pinned-grid {
-  display: flex;
-  flex-flow: row nowrap;
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: none;
+  grid-auto-flow: column;
+  grid-auto-columns: calc((100% - (var(--completed-gap) * (var(--photo-columns, 3) - 1))) / var(--photo-columns, 3));
+  align-items: start;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 3px 0;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-x pan-y;
   scroll-snap-type: x mandatory;
 }
 
@@ -3007,10 +3080,10 @@ body.is-photo-selection-mode .completed-photo-card {
 }
 
 .completed-photo-grid.is-pinned-grid .completed-photo-card {
-  flex: 0 0 var(--pinned-photo-size);
-  width: var(--pinned-photo-size);
-  min-width: var(--pinned-photo-size);
-  height: var(--pinned-photo-size);
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  aspect-ratio: 1 / 1;
   scroll-snap-align: start;
   scroll-snap-stop: always;
 }

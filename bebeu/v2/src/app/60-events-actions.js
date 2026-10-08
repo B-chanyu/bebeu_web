@@ -1531,6 +1531,7 @@ function refreshPhotoSelectionUi() {
 }
 
 function clearPhotoSelection() {
+  state.photoPressStart = null;
   state.selectedPhotoIds = [];
   state.photoSelectionMode = false;
   state.photoDragSelection = null;
@@ -1588,6 +1589,7 @@ function handlePhotoPointerDown(event) {
   const card = event.target.closest("[data-photo-card]");
   if (!card || event.target.closest("button")) return;
   if (state.photoSelectionMode) {
+    if (card.closest(".is-pinned-strip, .is-pinned-grid")) return;
     event.preventDefault();
     event.stopPropagation();
     const selected = state.selectedPhotoIds.includes(card.dataset.photoCard);
@@ -1603,6 +1605,7 @@ function handlePhotoPointerDown(event) {
     return;
   }
   clearTimeout(state.photoPressTimer);
+  state.photoPressStart = { x: event.clientX, y: event.clientY, pointerId: event.pointerId };
   state.photoPressTimer = setTimeout(async () => {
     state.suppressPhotoTap = true;
     if (isCompletedDetail()) togglePhotoSelection(card.dataset.photoCard);
@@ -1612,6 +1615,7 @@ function handlePhotoPointerDown(event) {
 }
 
 function handlePhotoPointerEnd() {
+  state.photoPressStart = null;
   clearTimeout(state.photoPressTimer);
   state.photoPressTimer = null;
   state.photoDragSelection = null;
@@ -1764,6 +1768,12 @@ function clamp(value, min, max) {
 }
 
 function handlePhotoPointerMove(event) {
+  const start = state.photoPressStart;
+  if (start && start.pointerId === event.pointerId && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 8) {
+    clearTimeout(state.photoPressTimer);
+    state.photoPressTimer = null;
+    state.photoPressStart = null;
+  }
   if (!state.photoDragSelection || !state.photoSelectionMode) return;
   if (state.photoDragSelection.pointerId !== undefined && state.photoDragSelection.pointerId !== event.pointerId) return;
   event.preventDefault();

@@ -567,12 +567,15 @@ function renderRecentPhotoStrip(order, maxCount = 5, includeAddButton = false) {
   if (!photos.length && !includeAddButton) return "";
   return `
     <div class="order-recent-photos ${includeAddButton ? "has-add-button" : ""}" aria-label="최근 업로드 사진">
-      ${includeAddButton ? `<span class="order-recent-photo-add" role="button" tabindex="0" data-list-photo-add="${escapeHtml(order.id)}" aria-label="사진 빠른 추가">+</span>` : ""}
+      ${includeAddButton ? `<button class="order-recent-photo-add" type="button" data-list-photo-add="${escapeHtml(order.id)}" aria-label="사진 빠른 추가" title="사진 추가">+</button>` : ""}
       <span class="order-recent-photo-track" style="--recent-visible-count:${Math.max(1, Number(maxCount) || 5)}">
         ${photos.map((photo) => {
           const isVideo = (photo.mimeType || "").startsWith("video/");
           const src = mediaDisplayUrl(photo);
-          return `<i>${isVideo ? `<video src="${serverAssetUrl(photo.url)}" preload="metadata" muted playsinline></video>` : `<img src="${src}" alt="최근 업로드 사진" loading="lazy" decoding="async">`}</i>`;
+          const media = isVideo ? `<video src="${serverAssetUrl(photo.url)}" preload="metadata" muted playsinline></video>` : `<img src="${src}" alt="최근 업로드 사진" loading="lazy" decoding="async">`;
+          return includeAddButton
+            ? `<button class="order-recent-photo-item" type="button" data-order="${escapeHtml(order.id)}" aria-label="작업 사진 열기">${media}</button>`
+            : `<i>${media}</i>`;
         }).join("")}
       </span>
     </div>
@@ -905,6 +908,7 @@ function renderOrderCard(order) {
         <button class="order-card-open" type="button" data-order="${order.id}">
           ${renderOrderTitleBlock(order)}
         </button>
+        ${state.tab === "work" ? renderRecentPhotoStrip(order, 5, true) : ""}
         ${doneQuickShareActions}
         ${cardActions}
         ${quickActions}
@@ -931,8 +935,9 @@ function renderOrderCard(order) {
             ${renderPickupPreview(order)}
           </span>
         </div>
-        ${renderRecentPhotoStrip(order, 5, state.tab === "work")}
+        ${state.tab !== "work" ? renderRecentPhotoStrip(order, 5) : ""}
       </button>
+      ${state.tab === "work" ? renderRecentPhotoStrip(order, 5, true) : ""}
       ${doneQuickShareActions}
       ${state.tab === "work" ? `<button class="quick-complete-action" type="button" data-quick-complete="${escapeHtml(order.id)}">완료</button>` : ""}
       ${cardActions}
@@ -981,7 +986,7 @@ function renderDetail() {
       ${renderDetailPhotoSpecialNotice(importantMemo)}
       ${renderDetailTaskBars(order)}
       <div class="detail-photo-lanes">
-        ${pinnedSelectedPhotos.length ? `<div class="photo-strip is-pinned-strip">
+        ${pinnedSelectedPhotos.length ? `<div class="photo-strip is-pinned-strip ${photoGridClass()}" aria-label="고정 사진">
           ${pinnedSelectedPhotos.map(renderPhotoCard).join("")}
         </div>` : ""}
         ${regularSelectedPhotos.length || state.selectedStep !== "all" ? `<div class="photo-strip is-regular-strip ${photoGridClass()}">
@@ -1077,7 +1082,7 @@ function renderCompletedPhotoBoard(order, stepRows) {
                 <span>${photos.length}장</span>
               </div>
               <div class="completed-photo-lanes">
-                ${pinnedPhotos.length ? `<div class="completed-photo-grid is-pinned-grid">
+                ${pinnedPhotos.length ? `<div class="completed-photo-grid is-pinned-grid ${photoGridClass()}" aria-label="고정 사진">
                   ${pinnedPhotos.map(renderCompletedPhotoCard).join("")}
                 </div>` : ""}
                 <div class="completed-photo-grid is-regular-grid ${photoGridClass()}">

@@ -101,6 +101,7 @@ const state = {
   trashExpandedPhotoId: null,
   chatTransferMessageId: null,
   photoPressTimer: null,
+  photoPressStart: null,
   orderPressTimer: null,
   suppressPhotoTap: false,
   suppressDoneOrderTap: false,
