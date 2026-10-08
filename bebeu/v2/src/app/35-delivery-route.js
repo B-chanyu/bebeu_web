@@ -1,13 +1,9 @@
 const BEBEU_STORE_LOCATION = {
   name: "베베유",
   address: "전남광주 광산구 첨단내촌로57번길 6",
-  latitude: 35.220365,
-  longitude: 126.847487,
+  latitude: 35.211931,
+  longitude: 126.836767,
 };
-let naverMapScriptPromise = null;
-let deliveryMapInstance = null;
-let deliveryCurrentMarker = null;
-let deliveryWorkerMarker = null;
 let deliveryWorkerLocationWatchId = null;
 let deliveryLocationPollTimer = null;
 let deliveryLocationStreamController = null;
@@ -15,6 +11,122 @@ let deliveryLocationStreamRetryTimer = null;
 let lastDeliveryLocationSaveAt = 0;
 let lastDeliveryLocationSent = null;
 let deliveryRouteDrag = null;
+let deliveryTrip = { active: false, index: 0, route: [], userId: "" };
+let deliveryNativeWatchActive = false;
+let deliveryInitialFocusDone = false;
+let deliveryTripListenerPromise = null;
+let deliveryWorkerFocusDone = false;
+
+function nativeDeliveryTripPlugin() {
+  return isNativeApp() ? window.Capacitor?.Plugins?.DeliveryTrip : null;
+}
+
+function deliveryTripControls() {
+  if (!isDeliveryOnlyUser()) return "";
+  return `<div class="delivery-trip-controls" id="deliveryTripControls">
+    ${deliveryTrip.active ? `
+      <div class="delivery-trip-buttons">
+        <button type="button" id="deliveryPreviousButton" ${deliveryTrip.index === 0 ? "disabled" : ""}>이전</button>
+        <button type="button" id="deliveryNextButton" ${deliveryTrip.index >= deliveryTrip.route.length - 1 ? "disabled" : ""}>다음</button>
+        <button type="button" id="deliveryEndButton">종료</button>
+      </div>
+      <div class="delivery-next-address">${escapeHtml(deliveryTrip.route[deliveryTrip.index]?.address || "")}</div>
+    ` : `<button type="button" id="deliveryStartButton" ${isDeliveryRouteReady() ? "" : "disabled"}>배송 시작</button>`}
+  </div>`;
+}
+
+function applyDeliveryTrip(next) {
+  if (next.active && next.userId !== state.currentUserId) return;
+  deliveryTrip = { ...deliveryTrip, ...next };
+  const controls = document.querySelector("#deliveryTripControls");
+  if (controls) controls.outerHTML = deliveryTripControls();
+  const input = document.querySelector("#deliveryAddressInput");
+  if (input) input.disabled = deliveryTrip.active;
+  postDeliveryMapState(false);
+  if (deliveryTrip.active) focusDeliveryMap(deliveryTrip.route[deliveryTrip.index]);
+}
+
+async function initializeDeliveryTrip() {
+  const plugin = nativeDeliveryTripPlugin();
+  if (!plugin) return;
+  if (!deliveryTripListenerPromise) deliveryTripListenerPromise = (async () => {
+    await plugin.addListener("state", (value) => {
+      applyDeliveryTrip(value);
+      if (isDeliveryOnlyUser() && state.tab === "delivery") syncDeliveryLocationTracking();
+    });
+    await plugin.addListener("location", (location) => {
+      if (isDeliveryOnlyUser()) receiveDeliveryPosition(location, deliveryTrip.active);
+    });
+    await plugin.addListener("error", ({ message }) => updateDeliveryMapStatus(message));
+    await plugin.addListener("watchStopped", () => { deliveryNativeWatchActive = false; });
+  })();
+  await deliveryTripListenerPromise;
+  const saved = await plugin.getState();
+  if (saved.active && saved.userId === state.currentUserId) {
+    if (!state.deliveryRoute.length) {
+      state.deliveryRoute = saved.route;
+      state.deliveryRouteOrigin = state.deliveryLocation || BEBEU_STORE_LOCATION;
+    }
+    applyDeliveryTrip(saved);
+  } else if (saved.active) {
+    await plugin.command({ action: "stop" });
+  } else applyDeliveryTrip({ active: false });
+  if (state.tab === "delivery" && isDeliveryOnlyUser() && !deliveryTrip.active && !deliveryNativeWatchActive) {
+    deliveryNativeWatchActive = true;
+    try { await plugin.watchLocation(); }
+    catch (error) { deliveryNativeWatchActive = false; updateDeliveryMapStatus(error.message); }
+  }
+}
+
+async function startDeliveryTrip() {
+  if (!isDeliveryOnlyUser() || !isDeliveryRouteReady()) return;
+  const route = state.deliveryRoute.map((item) => ({
+    address: deliveryRouteAddress(item), latitude: Number(item.latitude), longitude: Number(item.longitude),
+    isStore: Boolean(item.isStore), orderId: item.orderId || "",
+  }));
+  try {
+    setGlobalLoading("배송 시작 중...");
+    const plugin = nativeDeliveryTripPlugin();
+    if (isNativeApp() && !plugin) throw new Error("배송지 알림을 사용하려면 최신 앱으로 업데이트해 주세요.");
+    if (plugin && !window.confirm("배송을 시작하면 화면이 꺼지거나 다른 앱을 사용해도 현재 위치가 베베유 관리자에게 전송됩니다. 종료를 누르면 백그라운드 위치 공유와 배송 알림이 중단됩니다. 시작할까요?")) return;
+    if (plugin) await plugin.start({ route, userId: state.currentUserId });
+    else applyDeliveryTrip({ active: true, index: 0, route, userId: state.currentUserId });
+    showToast(plugin ? "배송을 시작했습니다." : "배송을 시작했습니다. 휴대폰 알림은 Android 앱에서 제공됩니다.");
+  } catch (error) {
+    showToast(error.message || "배송을 시작하지 못했습니다.");
+  } finally { setGlobalLoading(""); }
+}
+
+async function changeDeliveryStop(action) {
+  if (!isDeliveryOnlyUser() || !deliveryTrip.active) return;
+  const plugin = nativeDeliveryTripPlugin();
+  if (plugin) { await plugin.command({ action }); return; }
+  const index = Math.max(0, Math.min(deliveryTrip.route.length - 1, deliveryTrip.index + (action === "next" ? 1 : -1)));
+  applyDeliveryTrip({ index });
+}
+
+async function stopDeliveryTrip() {
+  const plugin = nativeDeliveryTripPlugin();
+  if (plugin) await plugin.command({ action: "stop" });
+  applyDeliveryTrip({ active: false, index: 0, route: [], userId: "" });
+}
+
+function receiveDeliveryPosition(location, sentByNative = false) {
+  if (!Number.isFinite(Number(location?.latitude)) || !Number.isFinite(Number(location?.longitude))) return;
+  state.deliveryLocation = location;
+  updateCurrentDeliveryMarker(location);
+  const info = document.querySelector(".delivery-map-info");
+  if (info) {
+    info.querySelector("strong").textContent = "현재 위치";
+    info.querySelector("span").textContent = formatDeliveryCoordinates(location);
+  }
+  if (!deliveryInitialFocusDone) { deliveryInitialFocusDone = true; focusDeliveryMap(location); }
+  const now = Date.now();
+  if (!sentByNative && now - lastDeliveryLocationSaveAt >= 3000) {
+    lastDeliveryLocationSaveAt = now;
+    saveDeliveryLocation(location);
+  }
+}
 
 function deliveryJobs() {
   return Array.isArray(state.data?.deliveryJobs) ? state.data.deliveryJobs : [];
@@ -138,7 +250,7 @@ function renderDelivery() {
   const routeItems = state.deliveryRoute.length ? state.deliveryRoute : deliveryAddressLines(addresses).map((address) => ({ address }));
   const deliveryStopCount = routeItems.filter((item) => !item?.isStore).length;
   const routeReady = isDeliveryRouteReady();
-  const hasMapKey = Boolean(state.data?.mapSettings?.naverMapsEnabled);
+  const hasMapKey = Boolean(state.data?.mapSettings?.kakaoMapsEnabled);
   const savedDeliveryLocation = state.data?.deliveryLocation;
   const deliveryLocationLabel = savedDeliveryLocation && isAdminUser()
     ? `${savedDeliveryLocation.userName || "배송"} 위치: ${formatDeliveryLocationTime(savedDeliveryLocation.updatedAt)}`
@@ -154,7 +266,7 @@ function renderDelivery() {
       </div>
       ${renderDeliveryMap(hasMapKey)}
       ${deliveryLocationLabel ? `<p class="helper" id="deliveryWorkerLocationLabel">${escapeHtml(deliveryLocationLabel)}</p>` : `<p class="helper" id="deliveryWorkerLocationLabel" hidden></p>`}
-      ${hasMapKey ? "" : `<p class="helper">설정에서 네이버 지도 Client ID를 저장하면 실제 지도가 표시됩니다.</p>`}
+      ${hasMapKey ? "" : `<p class="helper">카카오 지도 서버 설정이 필요합니다.</p>`}
       <p class="helper delivery-map-status" id="deliveryMapStatus" ${state.deliveryMapMessage ? "" : "hidden"}>${escapeHtml(state.deliveryMapMessage || "")}</p>
       <div class="delivery-action-row">
         <button class="primary-button" type="button" id="deliveryLocateButton">현재 위치로 이동</button>
@@ -165,7 +277,7 @@ function renderDelivery() {
         <h3>주소 입력</h3>
         <span class="chip">한 줄에 한 곳</span>
       </div>
-      <textarea id="deliveryAddressInput" class="delivery-address-input" rows="8" placeholder="예) 광주 광산구 상무대로 ...">${escapeHtml(addresses)}</textarea>
+      <textarea id="deliveryAddressInput" class="delivery-address-input" rows="8" ${deliveryTrip.active ? "disabled" : ""} placeholder="예) 광주 광산구 상무대로 ...">${escapeHtml(addresses)}</textarea>
       <div class="delivery-add-row">
         <button class="secondary-button" type="button" id="deliveryOrderPickerButton">배송 추가</button>
         <span>${activeDeliveryJobs().length}건 배송 전</span>
@@ -196,7 +308,7 @@ function renderDelivery() {
             <li class="is-origin">
               <span>출발</span>
               <div class="delivery-route-static">
-                <strong>현재 위치</strong>
+                <strong>${state.deliveryRouteOrigin.isStore || state.deliveryRouteOrigin.address === "베베유 사무실" ? "베베유 사무실" : "현재 위치"}</strong>
                 <small>${escapeHtml(formatDeliveryCoordinates(state.deliveryRouteOrigin))}</small>
               </div>
             </li>
@@ -227,69 +339,27 @@ function renderDelivery() {
     ` : ""}
   `;
   initializeDeliveryMap();
-  requestDeliveryLocationOnce();
   syncDeliveryLocationTracking();
+  if (isDeliveryOnlyUser()) initializeDeliveryTrip().catch(() => {});
 }
 
 function renderDeliveryMap(hasMapKey = false) {
   const location = state.deliveryLocation;
   const locationText = location
     ? `현재 위치: ${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}`
-    : `${BEBEU_STORE_LOCATION.address} 기준으로 지도를 표시합니다. 위치 권한을 허용하면 현재 위치로 이동합니다.`;
+    : BEBEU_STORE_LOCATION.address;
   return `
     <div class="delivery-map-card ${hasMapKey ? "has-real-map" : ""}">
-      <div id="deliveryNaverMap" class="delivery-real-map" aria-label="배송 지도"></div>
+      ${hasMapKey ? `<iframe id="deliveryKakaoMap" class="delivery-real-map" title="카카오 배송 지도" src="${escapeHtml(serverUrl("/delivery-map.html"))}"></iframe>` : ""}
+      ${deliveryTripControls()}
       <div class="delivery-map-grid" aria-hidden="true"></div>
       <div class="delivery-map-pin" aria-hidden="true"></div>
       <div class="delivery-map-info">
-        <strong>현재 위치</strong>
+        <strong>${location ? "현재 위치" : "베베유 사무실"}</strong>
         <span>${escapeHtml(locationText)}</span>
       </div>
     </div>
   `;
-}
-
-function loadNaverMapScript() {
-  if (window.naver?.maps) return Promise.resolve();
-  if (naverMapScriptPromise) return naverMapScriptPromise;
-  const existing = document.querySelector("#naverMapScript");
-  if (existing) existing.remove();
-  naverMapScriptPromise = new Promise((resolve, reject) => {
-    let settled = false;
-    const script = document.createElement("script");
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      window.clearTimeout(timeoutId);
-      script.dataset.loadState = "ready";
-      resolve();
-    };
-    const fail = (message) => {
-      if (settled) return;
-      settled = true;
-      window.clearTimeout(timeoutId);
-      script.remove();
-      naverMapScriptPromise = null;
-      reject(new Error(message));
-    };
-    const timeoutId = window.setTimeout(() => {
-      fail("네이버 지도 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.");
-    }, 15000);
-    window.__BEBEU_NAVER_MAP_READY__ = () => {
-      if (window.naver?.maps) finish();
-      else fail("네이버 지도 API 초기화에 실패했습니다.");
-    };
-    script.id = "naverMapScript";
-    script.dataset.loadState = "loading";
-    script.src = serverUrl(`/api/naver-map.js?v=${encodeURIComponent(CUSTOMER_SHARE_CACHE_VERSION)}`);
-    script.async = true;
-    script.onload = () => {
-      if (window.naver?.maps) finish();
-    };
-    script.onerror = () => fail("네이버 지도 스크립트를 불러오지 못했습니다. 등록된 Web 서비스 URL을 확인해 주세요.");
-    document.head.appendChild(script);
-  });
-  return naverMapScriptPromise;
 }
 
 function updateDeliveryMapStatus(message = "") {
@@ -300,118 +370,59 @@ function updateDeliveryMapStatus(message = "") {
   status.hidden = !message;
 }
 
-function initializeDeliveryMap() {
-  const container = document.querySelector("#deliveryNaverMap");
-  if (!container || !state.data?.mapSettings?.naverMapsEnabled) return;
-  loadNaverMapScript().then(() => {
-    if (!document.body.contains(container)) return;
-    if (!window.naver?.maps) {
-      updateDeliveryMapStatus(window.__BEBEU_NAVER_MAP_ERROR__ || "네이버 지도 API가 로드되지 않았습니다. 네이버 클라우드의 Web 서비스 URL 설정을 확인해 주세요.");
-      return;
-    }
-    updateDeliveryMapStatus("");
-    const mapCard = container.closest(".delivery-map-card");
-    const storePosition = new naver.maps.LatLng(BEBEU_STORE_LOCATION.latitude, BEBEU_STORE_LOCATION.longitude);
-    const currentPosition = state.deliveryLocation
-      ? new naver.maps.LatLng(state.deliveryLocation.latitude, state.deliveryLocation.longitude)
-      : null;
-    const savedDeliveryLocation = state.data?.deliveryLocation;
-    const workerPosition = savedDeliveryLocation && isAdminUser()
-      ? new naver.maps.LatLng(savedDeliveryLocation.latitude, savedDeliveryLocation.longitude)
-      : null;
-    const map = new naver.maps.Map(container, {
-      center: currentPosition || workerPosition || storePosition,
-      zoom: currentPosition || workerPosition ? 15 : 14,
-      size: new naver.maps.Size(Math.max(container.clientWidth, 320), Math.max(container.clientHeight, 280)),
-      draggable: true,
-      pinchZoom: true,
-      scrollWheel: true,
-      disableDoubleTapZoom: false,
-      zoomControl: true,
-      zoomControlOptions: { position: naver.maps.Position.TOP_RIGHT },
-    });
-    deliveryMapInstance = map;
-    deliveryCurrentMarker = null;
-    deliveryWorkerMarker = null;
-    mapCard?.classList.add("is-map-ready");
-    const bounds = new naver.maps.LatLngBounds();
-    const markers = [];
-    let fittedMarkerCount = 0;
-    const addMarker = (position, titleText, className = "") => {
-      const marker = new naver.maps.Marker({
-        position,
-        map,
-        title: titleText,
-        icon: {
-          content: `<div class="delivery-naver-marker ${className}">${escapeHtml(titleText.slice(0, 2))}</div>`,
-          anchor: new naver.maps.Point(15, 15),
-        },
-      });
-      markers.push(marker);
-      bounds.extend(position);
-      fittedMarkerCount += 1;
-      return marker;
-    };
-    const routeIncludesStore = state.deliveryRoute.some((item) => item?.isStore);
-    if (!routeIncludesStore) addMarker(storePosition, "베베유", "is-store");
-    if (currentPosition) {
-      deliveryCurrentMarker = addMarker(currentPosition, "현재", "is-current");
-      map.setCenter(currentPosition);
-    }
-    if (workerPosition) {
-      deliveryWorkerMarker = addMarker(workerPosition, savedDeliveryLocation.userName || "배송", "is-worker");
-    }
-    const routePoints = state.deliveryRoute.filter((item) => item && typeof item === "object" && Number.isFinite(Number(item.latitude)) && Number.isFinite(Number(item.longitude)));
-    state.deliveryRoute.forEach((item, index) => {
-      const routePath = (Array.isArray(item?.pathFromPrevious) ? item.pathFromPrevious : [])
-        .filter((point) => Number.isFinite(Number(point?.latitude)) && Number.isFinite(Number(point?.longitude)));
-      if (routePath.length <= 1) return;
-      const linePath = routePath.map((point) => new naver.maps.LatLng(Number(point.latitude), Number(point.longitude)));
-      new naver.maps.Polyline({
-        map,
-        path: linePath,
-        strokeColor: "#124f46",
-        strokeOpacity: 0.95,
-        strokeWeight: 6,
-        strokeLineCap: "round",
-        strokeLineJoin: "round",
-        zIndex: 100,
-      });
-      linePath.forEach((position) => bounds.extend(position));
-    });
-    routePoints.forEach((item, index) => {
-      addMarker(
-        new naver.maps.LatLng(Number(item.latitude), Number(item.longitude)),
-        item.isStore ? "도착" : `${index + 1}`,
-        item.isStore ? "is-store" : ""
-      );
-    });
-    const addresses = routePoints.length ? [] : currentDeliveryRouteAddresses();
-    if (!window.naver.maps.Service?.geocode || !addresses.length) {
-      if (fittedMarkerCount > 1) map.fitBounds(bounds);
-      window.requestAnimationFrame(() => naver.maps.Event.trigger(map, "resize"));
-      return;
-    }
-    let pending = addresses.length;
-    addresses.forEach((address, index) => {
-      naver.maps.Service.geocode({ query: address }, (status, response) => {
-        pending -= 1;
-        if (status === naver.maps.Service.Status.OK) {
-          const item = response.v2.addresses?.[0];
-          if (item) {
-            addMarker(new naver.maps.LatLng(Number(item.y), Number(item.x)), `${index + 1}`);
-          }
-        }
-        if (pending === 0 && fittedMarkerCount > 1) {
-          map.fitBounds(bounds);
-          window.requestAnimationFrame(() => naver.maps.Event.trigger(map, "resize"));
-        }
-      });
-    });
-  }).catch((error) => {
-    updateDeliveryMapStatus(error.message || "네이버 지도를 불러오지 못했습니다. 네이버 클라우드의 Web 서비스 URL 설정을 확인해 주세요.");
-  });
+function postDeliveryMapState(fitRoute = false) {
+  const frame = document.querySelector("#deliveryKakaoMap");
+  if (!frame?.contentWindow) return;
+  frame.contentWindow.postMessage({
+    type: "bebeu-delivery-map-state",
+    origin: state.deliveryRouteOrigin,
+    route: state.deliveryRoute,
+    current: state.deliveryLocation,
+    worker: isAdminUser() ? state.data?.deliveryLocation : null,
+    activeIndex: deliveryTrip.active ? deliveryTrip.index : -1,
+    fitRoute,
+  }, new URL(serverUrl("/delivery-map.html")).origin);
 }
+
+function focusDeliveryMap(point) {
+  if (!point) return;
+  document.querySelector("#deliveryKakaoMap")?.contentWindow?.postMessage({
+    type: "bebeu-delivery-map-focus", point,
+  }, new URL(serverUrl("/delivery-map.html")).origin);
+}
+
+function postDeliveryMapPositions() {
+  document.querySelector("#deliveryKakaoMap")?.contentWindow?.postMessage({
+    type: "bebeu-delivery-map-positions",
+    current: state.deliveryLocation,
+    worker: isAdminUser() ? state.data?.deliveryLocation : null,
+  }, new URL(serverUrl("/delivery-map.html")).origin);
+}
+
+function initializeDeliveryMap() {
+  const frame = document.querySelector("#deliveryKakaoMap");
+  if (!frame || !state.data?.mapSettings?.kakaoMapsEnabled) return;
+  frame.addEventListener("load", () => {
+    if (!frame.isConnected) return;
+    postDeliveryMapState(state.deliveryRoute.length > 0);
+    if (isDeliveryOnlyUser() && state.deliveryLocation) focusDeliveryMap(state.deliveryLocation);
+  }, { once: true });
+}
+
+window.addEventListener("message", (event) => {
+  const frame = document.querySelector("#deliveryKakaoMap");
+  if (!frame || event.source !== frame.contentWindow
+    || event.origin !== new URL(serverUrl("/delivery-map.html")).origin) return;
+  if (event.data?.type === "bebeu-delivery-map-ready") {
+    frame.closest(".delivery-map-card")?.classList.add("is-map-ready");
+    updateDeliveryMapStatus("");
+    postDeliveryMapState(state.deliveryRoute.length > 0);
+    if (isDeliveryOnlyUser()) focusDeliveryMap(deliveryTrip.active ? deliveryTrip.route[deliveryTrip.index] : state.deliveryLocation);
+    else if (isAdminUser() && state.data?.deliveryLocation) focusDeliveryMap(state.data.deliveryLocation);
+  } else if (event.data?.type === "bebeu-delivery-map-error") {
+    updateDeliveryMapStatus(String(event.data.message || "카카오 지도를 표시하지 못했습니다."));
+  }
+});
 
 function deliveryAddressInputValue() {
   const liveInput = document.querySelector("#deliveryAddressInput");
@@ -483,13 +494,8 @@ function currentDeliveryRouteAddresses() {
   return route.map(deliveryRouteAddress).filter(Boolean);
 }
 
-function naverMapSearchUrl(address) {
-  return `https://map.naver.com/p/search/${encodeURIComponent(address)}`;
-}
-
-function naverMapRouteUrl(addresses) {
-  const query = addresses.join(" ");
-  return `https://map.naver.com/p/search/${encodeURIComponent(query)}`;
+function kakaoMapSearchUrl(address) {
+  return `https://map.kakao.com/link/search/${encodeURIComponent(address)}`;
 }
 
 function formatDeliveryLocationTime(value) {
@@ -513,13 +519,16 @@ function isDeliveryRouteReady() {
   return Boolean(last?.isStore && state.deliveryRoute.every((item) => Number.isFinite(Number(item?.latitude)) && Number.isFinite(Number(item?.longitude))));
 }
 
-function requestDeliveryLocationOnce() {
-  if (state.deliveryAutoLocateRequested || !navigator.geolocation) return;
-  state.deliveryAutoLocateRequested = true;
-  requestDeliveryLocation({ silent: true }).catch(() => {});
-}
-
 function requestDeliveryLocation(options = {}) {
+  const plugin = nativeDeliveryTripPlugin();
+  if (plugin && isDeliveryOnlyUser()) {
+    if (state.deliveryLocation) {
+      focusDeliveryMap(state.deliveryLocation);
+      return Promise.resolve(state.deliveryLocation);
+    }
+    startDeliveryWorkerTracking();
+    return Promise.reject(new Error("현재 위치를 확인하고 있습니다. 위치 서비스를 확인해 주세요."));
+  }
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) {
       const error = new Error("현재 위치를 사용할 수 없는 브라우저입니다.");
@@ -532,7 +541,10 @@ function requestDeliveryLocation(options = {}) {
       state.deliveryLocation = deliveryLocationFromPosition(position);
       saveDeliveryLocation(state.deliveryLocation);
       if (!options.silent) setGlobalLoading("");
-      if (options.render !== false) render();
+      updateCurrentDeliveryMarker(state.deliveryLocation);
+      const info = document.querySelector(".delivery-map-info span");
+      if (info) info.textContent = `현재 위치: ${formatDeliveryCoordinates(state.deliveryLocation)}`;
+      if (!options.silent) focusDeliveryMap(state.deliveryLocation);
       if (!options.silent) showToast("현재 위치를 확인했습니다.");
       resolve(state.deliveryLocation);
     }, (error) => {
@@ -583,6 +595,7 @@ function toggleDeliveryOrderSelection(orderId) {
 
 async function addSelectedDeliveryOrders() {
   if (!state.selectedDeliveryOrderIds.length) return;
+  await stopDeliveryTrip();
   try {
     setGlobalLoading("배송 항목 추가 중...");
     const result = await api("/api/delivery/jobs", {
@@ -645,6 +658,7 @@ async function completeDeliveryJob(orderId) {
 async function removeDeliveryJob(orderId) {
   const job = deliveryJobs().find((item) => item.orderId === orderId);
   if (!job) return;
+  await stopDeliveryTrip();
   try {
     setGlobalLoading("배송 목록 정리 중...");
     const remainingInput = deliveryAddressLines(deliveryAddressInputValue())
@@ -668,6 +682,7 @@ async function removeDeliveryJob(orderId) {
 }
 
 async function buildDeliveryRoute() {
+  await stopDeliveryTrip();
   const input = deliveryAddressInputValue();
   const addresses = deliveryAddressLines(input);
   localStorage.setItem(DELIVERY_ADDRESS_STORAGE_KEY, input);
@@ -678,17 +693,14 @@ async function buildDeliveryRoute() {
     return;
   }
   try {
-    if (!state.deliveryLocation) {
-      setGlobalLoading("출발할 현재 위치 확인 중...");
-      await requestDeliveryLocation({ silent: true, render: false });
-    }
-    setGlobalLoading("현위치부터 사무실까지 최적 동선 계산 중...");
+    const origin = state.deliveryLocation || { ...BEBEU_STORE_LOCATION, isStore: true };
+    setGlobalLoading("구·동별 배송 동선 계산 중...");
     await waitForPaint();
     const result = await api("/api/delivery/route", {
       method: "POST",
       body: JSON.stringify({
         addresses,
-        origin: state.deliveryLocation,
+        origin,
       }),
     });
     state.deliveryRoute = attachDeliveryJobsToRoute(result.route || []);
@@ -699,13 +711,13 @@ async function buildDeliveryRoute() {
     const failedText = result.failed?.length
       ? ` 좌표를 찾지 못한 항목 ${result.failed.length}개는 제외했습니다. 도로명만 입력한 경우 건물번호를 함께 입력해 주세요.`
       : "";
-    state.deliveryRouteMessage = `배송지를 동네별로 묶고 같은 동네의 가까운 지점을 이어서 계산했습니다. 마지막은 베베유 사무실입니다. 총 약 ${totalMinutes}분 · ${totalKm}km.${failedText}`;
+    state.deliveryRouteMessage = `구·동별 차량 이동시간 기준 동선입니다. 마지막은 베베유 사무실입니다. 총 약 ${totalMinutes}분 · ${totalKm}km.${failedText}`;
     render();
     showToast("동선을 만들었습니다.");
   } catch (error) {
     state.deliveryRoute = [];
     state.deliveryRouteOrigin = null;
-    state.deliveryRouteMessage = error.message || "네이버 경로 계산에 실패했습니다.";
+    state.deliveryRouteMessage = error.message || "카카오 경로 계산에 실패했습니다.";
     render();
   } finally {
     setGlobalLoading("");
@@ -713,6 +725,7 @@ async function buildDeliveryRoute() {
 }
 
 async function clearDeliveryRoute() {
+  await stopDeliveryTrip();
   try {
     setGlobalLoading("배송 목록 비우는 중...");
     const result = await api("/api/delivery/jobs", { method: "DELETE" });
@@ -748,21 +761,8 @@ function deliveryDistanceMeters(a, b) {
 }
 
 function updateCurrentDeliveryMarker(location) {
-  if (!deliveryMapInstance || !window.naver?.maps || !location) return;
-  const position = new naver.maps.LatLng(location.latitude, location.longitude);
-  if (deliveryCurrentMarker) {
-    deliveryCurrentMarker.setPosition(position);
-    return;
-  }
-  deliveryCurrentMarker = new naver.maps.Marker({
-    position,
-    map: deliveryMapInstance,
-    title: "현재 위치",
-    icon: {
-      content: `<div class="delivery-naver-marker is-current">현재</div>`,
-      anchor: new naver.maps.Point(15, 15),
-    },
-  });
+  if (!location) return;
+  postDeliveryMapPositions();
 }
 
 function updateDeliveryWorkerLocation(location) {
@@ -773,25 +773,16 @@ function updateDeliveryWorkerLocation(location) {
     label.textContent = `${location.userName || "배송"} 위치: ${formatDeliveryLocationTime(location.updatedAt)}`;
     label.hidden = false;
   }
-  if (!isAdminUser() || !deliveryMapInstance || !window.naver?.maps) return;
-  const position = new naver.maps.LatLng(Number(location.latitude), Number(location.longitude));
-  if (deliveryWorkerMarker) {
-    deliveryWorkerMarker.setPosition(position);
-    return;
+  if (isAdminUser()) postDeliveryMapPositions();
+  if (isAdminUser() && !deliveryWorkerFocusDone) {
+    deliveryWorkerFocusDone = true;
+    focusDeliveryMap(location);
   }
-  deliveryWorkerMarker = new naver.maps.Marker({
-    position,
-    map: deliveryMapInstance,
-    title: location.userName || "배송",
-    icon: {
-      content: `<div class="delivery-naver-marker is-worker">배송</div>`,
-      anchor: new naver.maps.Point(15, 15),
-    },
-  });
-  deliveryMapInstance.panTo(position);
 }
 
 function stopDeliveryWorkerTracking() {
+  if (deliveryNativeWatchActive) nativeDeliveryTripPlugin()?.stopWatch().catch(() => {});
+  deliveryNativeWatchActive = false;
   if (deliveryWorkerLocationWatchId !== null && navigator.geolocation) {
     navigator.geolocation.clearWatch(deliveryWorkerLocationWatchId);
   }
@@ -862,22 +853,23 @@ async function startDeliveryLocationStream() {
 }
 
 function startDeliveryWorkerTracking() {
+  const plugin = nativeDeliveryTripPlugin();
+  if (plugin) {
+    if (deliveryTrip.active || deliveryNativeWatchActive) return;
+    deliveryNativeWatchActive = true;
+    initializeDeliveryTrip().then(() => plugin.watchLocation()).catch((error) => {
+      deliveryNativeWatchActive = false;
+      updateDeliveryMapStatus(error.message || "위치 권한을 확인해 주세요.");
+    });
+    return;
+  }
   if (deliveryWorkerLocationWatchId !== null || !navigator.geolocation) return;
   deliveryWorkerLocationWatchId = navigator.geolocation.watchPosition((position) => {
     if (state.tab !== "delivery" || !isDeliveryOnlyUser()) {
       stopDeliveryWorkerTracking();
       return;
     }
-    const location = deliveryLocationFromPosition(position);
-    state.deliveryLocation = location;
-    updateCurrentDeliveryMarker(location);
-    const now = Date.now();
-    const movedMeters = lastDeliveryLocationSent ? deliveryDistanceMeters(lastDeliveryLocationSent, location) : Infinity;
-    if (now - lastDeliveryLocationSaveAt >= 1000 && (movedMeters >= 2 || now - lastDeliveryLocationSaveAt >= 8000)) {
-      lastDeliveryLocationSaveAt = now;
-      lastDeliveryLocationSent = location;
-      saveDeliveryLocation(location);
-    }
+    receiveDeliveryPosition(deliveryLocationFromPosition(position));
   }, (error) => {
     updateDeliveryMapStatus(error.message || "배송 기사 위치를 확인하지 못했습니다.");
   }, {
@@ -932,7 +924,11 @@ async function copyDeliveryRoute() {
   if (!isDeliveryRouteReady()) return;
   const text = deliveryRouteCopyText();
   try {
-    await navigator.clipboard.writeText(text);
+    if (isNativeApp() && window.Capacitor?.Plugins?.Clipboard?.write) {
+      await window.Capacitor.Plugins.Clipboard.write({ string: text });
+    } else {
+      await navigator.clipboard.writeText(text);
+    }
   } catch {
     const textarea = document.createElement("textarea");
     textarea.value = text;
@@ -940,8 +936,9 @@ async function copyDeliveryRoute() {
     textarea.style.opacity = "0";
     document.body.appendChild(textarea);
     textarea.select();
-    document.execCommand("copy");
+    const copied = document.execCommand("copy");
     textarea.remove();
+    if (!copied) { showToast("복사하지 못했습니다. 앱을 업데이트해주세요."); return; }
   }
   showToast("배송 동선을 복사했습니다.");
 }
@@ -975,6 +972,7 @@ async function rebuildDeliveryRouteInOrder(addresses, previousRoute) {
 }
 
 function reorderDeliveryRoute(fromIndex, toIndex) {
+  if (deliveryTrip.active) { showToast("배송을 종료한 뒤 순서를 변경해 주세요."); return; }
   if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0) return;
   const previousRoute = [...state.deliveryRoute];
   const stops = state.deliveryRoute.filter((item) => !item?.isStore);

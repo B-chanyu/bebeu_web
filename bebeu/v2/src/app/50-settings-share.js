@@ -199,7 +199,7 @@ function renderNaverCafeSetting() {
           <span>카페 API</span>
           <strong>${settings.hasClientId && settings.hasClientSecret && settings.hasClubId && settings.hasMenuId ? "서버 설정 완료" : "서버 설정 필요"}</strong>
         </div>
-        <a class="primary-button naver-connect-button" href="${escapeHtml(settings.connectPath || "/api/naver-cafe/connect")}">네이버 계정 연결</a>
+        <a class="primary-button naver-connect-button" href="${escapeHtml(serverUrl(settings.connectPath || "/api/naver-cafe/connect"))}">네이버 계정 연결</a>
         <button class="secondary-button" type="button" data-naver-cafe-automation-login>자동화 로그인 열기</button>
         <label>글 제목 형식
           <input name="titleTemplate" type="text" autocomplete="off" value="${escapeHtml(settings.titleTemplate || "광주 {productName} 세탁 베베유")}">
@@ -508,8 +508,8 @@ function renderMapSetting() {
   const settings = state.data?.mapSettings || {};
   return `
     <div class="api-managed-status">
-      <span>네이버 지도 API</span>
-      <strong>${settings.naverMapsEnabled ? "서버 설정 완료" : "서버 설정 필요"}</strong>
+      <span>배송 지도</span>
+      <strong>${settings.kakaoMapsEnabled && settings.kakaoRoutesEnabled ? "서버 설정 완료" : "서버 설정 필요"}</strong>
     </div>
   `;
 }

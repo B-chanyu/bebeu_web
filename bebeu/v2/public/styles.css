@@ -4309,6 +4309,7 @@ body.is-photo-selection-mode .completed-photo-card {
 }
 
 .delivery-real-map {
+  border: 0;
   position: absolute;
   top: 0;
   right: 0;
@@ -4321,6 +4322,46 @@ body.is-photo-selection-mode .completed-photo-card {
   overflow: hidden;
   background: #e9efeb;
   touch-action: none;
+}
+
+.delivery-trip-controls {
+  position: absolute;
+  z-index: 3;
+  top: 12px;
+  left: 12px;
+  max-width: calc(100% - 66px);
+  display: grid;
+  gap: 6px;
+}
+
+.delivery-trip-buttons {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+}
+
+.delivery-trip-controls button {
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 1px solid #c6d4cf;
+  border-radius: 6px;
+  background: #fff;
+  color: #124f46;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.delivery-trip-controls button:disabled { opacity: 0.55; }
+.delivery-trip-controls #deliveryEndButton { color: #b33829; }
+.delivery-next-address {
+  background: #fff;
+  color: #182d27;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  box-shadow: 0 2px 8px #0002;
 }
 
 .delivery-map-card.is-map-ready .delivery-map-grid,

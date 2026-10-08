@@ -128,7 +128,6 @@ const state = {
   selectedDeliveryOrderIds: [],
   deliveryOrderQuery: "",
   deliveryTabEnabled: localStorage.getItem(DELIVERY_TAB_ENABLED_KEY) === "1",
-  deliveryAutoLocateRequested: false,
   attendancePayrollUserId: null,
   attendanceEditDay: null,
   trashSelectedPhotoIds: [],

@@ -9,6 +9,7 @@ const { execFileSync } = require("child_process");
 const { createHash, randomUUID } = require("crypto");
 const { gzipSync } = require("zlib");
 const iconv = require("iconv-lite");
+const { createKakaoDeliveryRouter } = require("./lib/kakao-delivery");
 
 let sharp = null;
 try {
@@ -73,6 +74,9 @@ const BEBEU_NAVER_PLACE_URL = "https://map.naver.com/p/entry/place/2065853195?c=
 const BEBEU_NAVER_PLACE_QUERY = "베베유 전남광주 광산구 첨단내촌로57번길 6";
 const NAVER_MAPS_CLIENT_ID = process.env.NAVER_MAPS_CLIENT_ID || process.env.NAVER_MAP_CLIENT_ID || "";
 const NAVER_MAPS_CLIENT_SECRET = process.env.NAVER_MAPS_CLIENT_SECRET || process.env.NAVER_MAP_CLIENT_SECRET || "";
+const KAKAO_MAPS_JAVASCRIPT_KEY = String(process.env.KAKAO_MAPS_JAVASCRIPT_KEY || "").trim();
+const KAKAO_REST_API_KEY = String(process.env.KAKAO_REST_API_KEY || "").trim();
+const KAKAO_DIRECTIONS_REST_API_KEY = String(process.env.KAKAO_DIRECTIONS_REST_API_KEY || KAKAO_REST_API_KEY).trim();
 const BEBEU_RUNTIME_VERSION = process.env.BEBEU_RUNTIME_VERSION || `${Date.now()}-${process.pid}`;
 const UPLOAD_LIMIT_BYTES = Number(process.env.UPLOAD_LIMIT_MB || 600) * 1024 * 1024;
 const APP_ALLOWED_ORIGINS = new Set(
@@ -801,8 +805,21 @@ function mapSettingsForClient(settings = {}) {
   const naverMapsClientId = String(NAVER_MAPS_CLIENT_ID || settings.naverMapsClientId || "").trim();
   return {
     naverMapsEnabled: Boolean(naverMapsClientId),
+    provider: "kakao",
+    kakaoMapsEnabled: Boolean(KAKAO_MAPS_JAVASCRIPT_KEY),
+    kakaoRoutesEnabled: Boolean(KAKAO_REST_API_KEY && KAKAO_DIRECTIONS_REST_API_KEY),
   };
 }
+
+const kakaoDeliveryRouter = createKakaoDeliveryRouter({
+  restApiKey: KAKAO_REST_API_KEY,
+  directionsApiKey: KAKAO_DIRECTIONS_REST_API_KEY,
+  store: { name: "베베유 사무실", address: BEBEU_STORE_ADDRESS, roadAddress: BEBEU_STORE_ADDRESS, latitude: 35.211931, longitude: 126.836767 },
+  searchCandidates: deliveryAddressSearchCandidates,
+  hasExplicitRegion: hasExplicitDeliveryRegion,
+  isGwangjuAddress: isGwangjuDeliveryAddress,
+  createError: (status, message) => new AppError(status, message),
+});
 
 function deliveryLocationForClient(location = null) {
   if (!location || typeof location !== "object") return null;
@@ -897,14 +914,6 @@ function deliveryJobFromOrder(order, userName = "", previous = null) {
   };
 }
 
-function naverMapsHeaders() {
-  return {
-    "X-NCP-APIGW-API-KEY-ID": NAVER_MAPS_CLIENT_ID,
-    "X-NCP-APIGW-API-KEY": NAVER_MAPS_CLIENT_SECRET,
-    Accept: "application/json",
-  };
-}
-
 function uniqueTextValues(values = []) {
   return [...new Set(values.map((value) => String(value || "").replace(/\s+/g, " ").trim()).filter(Boolean))];
 }
@@ -995,351 +1004,6 @@ function deliveryAddressSearchCandidates(address, knownAddresses = []) {
   }));
 }
 
-function cleanNaverLocalText(value) {
-  return String(value || "")
-    .replace(/<[^>]*>/gu, "")
-    .replace(/&amp;/gu, "&")
-    .replace(/&lt;/gu, "<")
-    .replace(/&gt;/gu, ">")
-    .replace(/&quot;/gu, '"')
-    .replace(/&#39;/gu, "'")
-    .trim();
-}
-
-function naverLocalCoordinate(value, limit) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return NaN;
-  return Math.abs(number) > limit ? number / 10000000 : number;
-}
-
-async function searchNaverLocalLocation(address, credentials = {}) {
-  const query = String(address || "").trim();
-  const clientId = String(credentials.clientId || process.env.NAVER_SEARCH_CLIENT_ID || NAVER_DEFAULT_CLIENT_ID || "").trim();
-  const clientSecret = String(credentials.clientSecret || process.env.NAVER_SEARCH_CLIENT_SECRET || NAVER_DEFAULT_CLIENT_SECRET || "").trim();
-  if (!query || !clientId || !clientSecret) return null;
-  const defaultToGwangju = !hasExplicitDeliveryRegion(query);
-  const keywords = defaultToGwangju ? [`광주광역시 ${query}`, `광주 ${query}`, query] : [query];
-  for (const keyword of uniqueTextValues(keywords)) {
-    const url = `https://openapi.naver.com/v1/search/local.json?query=${encodeURIComponent(keyword)}&display=5&start=1&sort=random`;
-    let response;
-    try {
-      response = await fetch(url, {
-        headers: {
-          "X-Naver-Client-Id": clientId,
-          "X-Naver-Client-Secret": clientSecret,
-          Accept: "application/json",
-        },
-      });
-    } catch {
-      continue;
-    }
-    if (!response.ok) continue;
-    const payload = await response.json().catch(() => ({}));
-    const item = (Array.isArray(payload.items) ? payload.items : []).find((candidate) => {
-      const longitude = naverLocalCoordinate(candidate.mapx, 180);
-      const latitude = naverLocalCoordinate(candidate.mapy, 90);
-      return Number.isFinite(longitude) && Number.isFinite(latitude);
-    });
-    if (!item) continue;
-    const resultAddress = `${item.roadAddress || ""} ${item.address || ""}`;
-    if (defaultToGwangju && !isGwangjuDeliveryAddress(resultAddress)) continue;
-    return {
-      address: query,
-      searchedText: keyword,
-      placeName: cleanNaverLocalText(item.title),
-      roadAddress: cleanNaverLocalText(item.roadAddress || item.address || query),
-      jibunAddress: cleanNaverLocalText(item.address || ""),
-      longitude: naverLocalCoordinate(item.mapx, 180),
-      latitude: naverLocalCoordinate(item.mapy, 90),
-    };
-  }
-  return null;
-}
-
-async function searchTopNaverLocation(address, options = {}) {
-  const query = String(address || "").trim();
-  if (!query) return null;
-  const defaultToGwangju = !hasExplicitDeliveryRegion(query);
-  const candidates = deliveryAddressSearchCandidates(query, options.knownAddresses);
-  for (const keyword of candidates) {
-    const url = `https://maps.apigw.ntruss.com/map-geocode/v2/geocode?query=${encodeURIComponent(keyword)}`;
-    const response = await fetch(url, { headers: naverMapsHeaders() });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new AppError(response.status, payload.errorMessage || payload.message || "주소 검색에 실패했습니다.");
-    }
-    const item = payload.addresses?.[0];
-    if (!item) continue;
-    if (defaultToGwangju && !isGwangjuDeliveryAddress(`${item.roadAddress || ""} ${item.jibunAddress || ""}`)) continue;
-    return {
-      address: query,
-      searchedText: keyword,
-      roadAddress: item.roadAddress || item.jibunAddress || query,
-      jibunAddress: item.jibunAddress || "",
-      longitude: Number(item.x),
-      latitude: Number(item.y),
-    };
-  }
-  return searchNaverLocalLocation(query, options.searchCredentials);
-}
-
-function haversineMeters(a, b) {
-  const radius = 6371000;
-  const toRad = (value) => Number(value) * Math.PI / 180;
-  const dLat = toRad(b.latitude - a.latitude);
-  const dLng = toRad(b.longitude - a.longitude);
-  const lat1 = toRad(a.latitude);
-  const lat2 = toRad(b.latitude);
-  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
-  return 2 * radius * Math.asin(Math.sqrt(h));
-}
-
-async function naverDrivingSummary(start, goal) {
-  const startText = `${start.longitude},${start.latitude}`;
-  const goalText = `${goal.longitude},${goal.latitude}`;
-  const url = `https://maps.apigw.ntruss.com/map-direction/v1/driving?start=${encodeURIComponent(startText)}&goal=${encodeURIComponent(goalText)}&option=trafast`;
-  const response = await fetch(url, { headers: naverMapsHeaders() });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload.code) {
-    throw new AppError(response.status || 500, payload.message || payload.errorMessage || "네이버 주행 경로 계산에 실패했습니다.");
-  }
-  const route = payload.route?.trafast?.[0] || payload.route?.traoptimal?.[0] || Object.values(payload.route || {})[0]?.[0];
-  const summary = route?.summary || {};
-  return {
-    duration: Number(summary.duration) || Math.round(haversineMeters(start, goal) / 8 * 1000),
-    distance: Number(summary.distance) || Math.round(haversineMeters(start, goal)),
-    path: Array.isArray(route?.path)
-      ? route.path.map(([longitude, latitude]) => ({ longitude: Number(longitude), latitude: Number(latitude) })).filter((point) => Number.isFinite(point.latitude) && Number.isFinite(point.longitude))
-      : [],
-    guide: Array.isArray(route?.guide)
-      ? route.guide.map((item) => ({
-        pointIndex: Number(item.pointIndex) || 0,
-        type: Number(item.type) || 0,
-        instructions: String(item.instructions || "").trim(),
-        distance: Number(item.distance) || 0,
-        duration: Number(item.duration) || 0,
-      })).filter((item) => item.instructions)
-      : [],
-  };
-}
-
-function deliveryNeighborhoodName(point) {
-  const text = `${point.jibunAddress || ""} ${point.roadAddress || ""}`.replace(/\s+/g, " ").trim();
-  const tokens = text.split(" ").filter(Boolean);
-  let neighborhoodIndex = -1;
-  for (let index = tokens.length - 1; index >= 0; index -= 1) {
-    if (/^[가-힣0-9·]+(?:동|읍|면|리)$/u.test(tokens[index])) {
-      neighborhoodIndex = index;
-      break;
-    }
-  }
-  if (neighborhoodIndex < 0) return "";
-  let district = "";
-  for (let index = neighborhoodIndex - 1; index >= 0; index -= 1) {
-    if (/^[가-힣0-9·]+(?:시|군|구)$/u.test(tokens[index])) {
-      district = tokens[index];
-      break;
-    }
-  }
-  return [district, tokens[neighborhoodIndex]].filter(Boolean).join(" ");
-}
-
-function deliveryClusterCenter(points) {
-  const count = Math.max(points.length, 1);
-  return {
-    latitude: points.reduce((sum, point) => sum + Number(point.latitude), 0) / count,
-    longitude: points.reduce((sum, point) => sum + Number(point.longitude), 0) / count,
-  };
-}
-
-function clusterDeliveryPoints(points) {
-  const namedClusters = new Map();
-  const unnamed = [];
-  points.forEach((point) => {
-    const neighborhood = deliveryNeighborhoodName(point);
-    point.neighborhood = neighborhood;
-    if (!neighborhood) {
-      unnamed.push(point);
-      return;
-    }
-    if (!namedClusters.has(neighborhood)) namedClusters.set(neighborhood, []);
-    namedClusters.get(neighborhood).push(point);
-  });
-  const clusters = [...namedClusters.entries()].map(([name, items]) => ({ name, items }));
-  unnamed.forEach((point) => {
-    let nearestCluster = null;
-    let nearestDistance = Infinity;
-    clusters.forEach((cluster) => {
-      const distance = haversineMeters(point, deliveryClusterCenter(cluster.items));
-      if (distance < nearestDistance) {
-        nearestDistance = distance;
-        nearestCluster = cluster;
-      }
-    });
-    if (nearestCluster && nearestDistance <= 2200) {
-      nearestCluster.items.push(point);
-    } else {
-      clusters.push({ name: point.roadAddress || point.address, items: [point] });
-    }
-  });
-  return clusters;
-}
-
-function deliveryRouteSummaryLoader() {
-  const cache = new Map();
-  return async (start, goal) => {
-    const key = [start.longitude, start.latitude, goal.longitude, goal.latitude]
-      .map((value) => Number(value).toFixed(7))
-      .join(":");
-    if (!cache.has(key)) cache.set(key, naverDrivingSummary(start, goal));
-    return cache.get(key);
-  };
-}
-
-async function nearestDeliveryPoint(current, points, getSummary) {
-  let bestIndex = 0;
-  let bestSummary = null;
-  for (let index = 0; index < points.length; index += 1) {
-    const summary = await getSummary(current, points[index]);
-    if (!bestSummary || summary.duration < bestSummary.duration) {
-      bestIndex = index;
-      bestSummary = summary;
-    }
-  }
-  return { index: bestIndex, summary: bestSummary };
-}
-
-async function orderDeliveryStopsByNeighborhood(points, store, getSummary) {
-  const remainingClusters = clusterDeliveryPoints(points);
-  const ordered = [];
-  let current = null;
-  let preferredEntry = null;
-
-  while (remainingClusters.length) {
-    let clusterIndex = 0;
-    if (!current) {
-      let farthestDistance = -1;
-      remainingClusters.forEach((cluster, index) => {
-        const distance = haversineMeters(deliveryClusterCenter(cluster.items), store);
-        if (distance > farthestDistance) {
-          farthestDistance = distance;
-          clusterIndex = index;
-        }
-      });
-    } else {
-      let nearestTransition = null;
-      for (let index = 0; index < remainingClusters.length; index += 1) {
-        const candidate = await nearestDeliveryPoint(current, remainingClusters[index].items, getSummary);
-        if (!nearestTransition || candidate.summary.duration < nearestTransition.summary.duration) {
-          nearestTransition = { clusterIndex: index, pointIndex: candidate.index, summary: candidate.summary };
-        }
-      }
-      clusterIndex = nearestTransition.clusterIndex;
-      preferredEntry = remainingClusters[clusterIndex].items[nearestTransition.pointIndex];
-    }
-
-    const cluster = remainingClusters.splice(clusterIndex, 1)[0];
-    const pending = [...cluster.items];
-    if (!current) {
-      let firstIndex = 0;
-      let farthestFromOffice = -1;
-      pending.forEach((point, index) => {
-        const distance = haversineMeters(point, store);
-        if (distance > farthestFromOffice) {
-          farthestFromOffice = distance;
-          firstIndex = index;
-        }
-      });
-      current = pending.splice(firstIndex, 1)[0];
-    } else {
-      const entryIndex = Math.max(0, pending.indexOf(preferredEntry));
-      current = pending.splice(entryIndex, 1)[0];
-    }
-    ordered.push(current);
-    preferredEntry = null;
-
-    while (pending.length) {
-      const nearest = await nearestDeliveryPoint(current, pending, getSummary);
-      current = pending.splice(nearest.index, 1)[0];
-      ordered.push(current);
-    }
-  }
-  return ordered;
-}
-
-async function buildNaverDeliveryRoute({
-  addresses = [],
-  origin = null,
-  preserveOrder = false,
-  knownAddresses = [],
-  searchCredentials = {},
-}) {
-  if (!NAVER_MAPS_CLIENT_ID || !NAVER_MAPS_CLIENT_SECRET) {
-    throw new AppError(400, "네이버 지도 API 정보가 서버에 설정되지 않았습니다.");
-  }
-  if (!origin || !Number.isFinite(Number(origin.latitude)) || !Number.isFinite(Number(origin.longitude))) {
-    throw new AppError(400, "출발할 현재 위치를 확인하지 못했습니다. 위치 권한을 허용한 뒤 다시 시도해 주세요.");
-  }
-  const start = {
-    address: "현재 위치",
-    latitude: Number(origin.latitude),
-    longitude: Number(origin.longitude),
-    isOrigin: true,
-  };
-  const store = {
-    name: "베베유 사무실",
-    address: BEBEU_STORE_ADDRESS,
-    roadAddress: BEBEU_STORE_ADDRESS,
-    latitude: 35.220365,
-    longitude: 126.847487,
-    isStore: true,
-  };
-  const resolved = [];
-  const failed = [];
-  for (const address of addresses) {
-    const point = await searchTopNaverLocation(address, { knownAddresses, searchCredentials });
-    if (point && Number.isFinite(point.latitude) && Number.isFinite(point.longitude)) {
-      resolved.push(point);
-    } else {
-      failed.push(address);
-    }
-  }
-  if (!resolved.length) {
-    throw new AppError(400, "입력한 주소에서 배송 위치를 찾지 못했습니다. 동 또는 도로명과 건물번호를 함께 입력해 주세요.");
-  }
-  const getSummary = deliveryRouteSummaryLoader();
-  const orderedStops = preserveOrder
-    ? [...resolved]
-    : await orderDeliveryStopsByNeighborhood(resolved, store, getSummary);
-  const route = [];
-  let current = start;
-  for (const next of orderedStops) {
-    const bestSummary = await getSummary(current, next);
-    route.push({
-      ...next,
-      durationFromPrevious: bestSummary.duration,
-      distanceFromPrevious: bestSummary.distance,
-      pathFromPrevious: bestSummary.path,
-      guideFromPrevious: bestSummary.guide,
-    });
-    current = next;
-  }
-  const storeSummary = await getSummary(current, store);
-  route.push({
-    ...store,
-    durationFromPrevious: storeSummary.duration,
-    distanceFromPrevious: storeSummary.distance,
-    pathFromPrevious: storeSummary.path,
-    guideFromPrevious: storeSummary.guide,
-  });
-  return {
-    origin: start,
-    route,
-    failed,
-    totalDuration: route.reduce((sum, item) => sum + (Number(item.durationFromPrevious) || 0), 0),
-    totalDistance: route.reduce((sum, item) => sum + (Number(item.distanceFromPrevious) || 0), 0),
-  };
-}
 
 function photoCacheKey(orderId, filename) {
   return `${orderId}/${filename}`;
@@ -4695,6 +4359,26 @@ async function handleApi(req, res, pathname) {
     return sendJson(res, 200, { ok: true, service: "bebeu", time: new Date().toISOString() });
   }
 
+  if (req.method === "GET" && pathname === "/api/kakao-map.js") {
+    res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-store" });
+    const sdkUrl = KAKAO_MAPS_JAVASCRIPT_KEY
+      ? `https://dapi.kakao.com/v2/maps/sdk.js?autoload=false&appkey=${encodeURIComponent(KAKAO_MAPS_JAVASCRIPT_KEY)}` : "";
+    return res.end(`window.__BEBEU_MAP_ALLOWED_ORIGINS__ = ${JSON.stringify([...APP_ALLOWED_ORIGINS])};
+(() => {
+  const fail = (message) => window.__BEBEU_KAKAO_MAP_FAILED__?.(message);
+  const url = ${JSON.stringify(sdkUrl)};
+  if (!url) return fail("서버에 카카오 지도 JavaScript 키가 등록되지 않았습니다.");
+  const script = document.createElement("script");
+  script.src = url;
+  script.onload = () => {
+    if (!window.kakao?.maps?.load) return fail("카카오 지도 인증에 실패했습니다. 키와 등록 도메인을 확인해주세요.");
+    kakao.maps.load(() => window.__BEBEU_KAKAO_MAP_READY__?.());
+  };
+  script.onerror = () => fail("카카오 지도 연결에 실패했습니다. 키와 등록 도메인을 확인해주세요.");
+  document.head.appendChild(script);
+})();`);
+  }
+
   if (req.method === "GET" && pathname === "/api/naver-map.js") {
     const clientId = String(NAVER_MAPS_CLIENT_ID || "").trim();
     if (!clientId) {
@@ -4906,23 +4590,18 @@ async function handleApi(req, res, pathname) {
     if (!user) return sendJson(res, 403, { error: "로그인이 필요합니다." });
     const body = await readBody(req);
     const addresses = Array.isArray(body.addresses)
-      ? body.addresses.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 25)
+      ? body.addresses.map((item) => String(item || "").trim()).filter(Boolean)
       : [];
     if (!addresses.length) return sendJson(res, 400, { error: "주소를 먼저 입력해 주세요." });
-    const naverSettings = { ...defaultNaverCafeSettings(), ...(db.appSettings?.naverCafe || {}) };
     const knownAddresses = uniqueTextValues([
       ...(db.orders || []).map((order) => order.address),
       ...normalizeDeliveryJobs(db.appSettings?.deliveryJobs, db.orders).map((job) => job.address),
     ]);
-    const result = await buildNaverDeliveryRoute({
+    const result = await kakaoDeliveryRouter.build({
       addresses,
       origin: body.origin || null,
       preserveOrder: body.preserveOrder === true,
       knownAddresses,
-      searchCredentials: {
-        clientId: naverSettings.clientId,
-        clientSecret: naverSettings.clientSecret,
-      },
     });
     return sendJson(res, 200, result);
   }
@@ -6402,7 +6081,7 @@ function serveStatic(req, res, pathname) {
     return;
   }
   const ext = path.extname(filePath).toLowerCase();
-  const noCache = ["/", "/sw.js", "/app.js", "/styles.css", "/index.html", "/download.html", "/privacy.html"].includes(pathname)
+  const noCache = ["/", "/sw.js", "/app.js", "/styles.css", "/index.html", "/download.html", "/privacy.html", "/app-release.json", "/delivery-map.html", "/delivery-map.js"].includes(pathname)
     || pathname.startsWith("/downloads/");
   const cacheControl = noCache
     ? "no-cache, no-store, must-revalidate"
