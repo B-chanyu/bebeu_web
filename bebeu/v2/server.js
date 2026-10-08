@@ -5198,13 +5198,20 @@ async function handleApi(req, res, pathname) {
         logInfo("Photo upload parsed", `${uploadContext} step=${stepCode} product=${productIndex} files=${originalFiles.length} parts=${form.files.length}`);
         if (!originalFiles.length) return sendJson(res, 400, { error: "저장할 사진 또는 동영상을 선택해주세요." });
 
+        const uploadJobId = String(form.fields.uploadJobId || "");
+        if (uploadJobId && !/^[a-zA-Z0-9-]{1,80}$/.test(uploadJobId)) return sendJson(res, 400, { error: "잘못된 업로드 식별자입니다." });
+        const uploadPhotoId = (index) => createHash("sha256").update(`${order.id}:${uploadJobId}:${uploadOffset + index}`).digest("hex").slice(0, 32);
+        const existingPhotos = uploadJobId ? originalFiles.map((file, index) => order.photos.find((photo) => photo.id === uploadPhotoId(index))) : [];
+        if (existingPhotos.length && existingPhotos.every(Boolean)) return sendJson(res, 200, { order, photos: existingPhotos });
+
         const photos = await Promise.all(originalFiles.map(async (file, index) => {
+          if (existingPhotos[index]) return existingPhotos[index];
           const displayFile = form.files.find((item) => item.fieldName === `displayFile${index}`) || null;
           const photo = await saveUploadedPhoto(order, stepCode, file, user?.name, productIndex, displayFile, uploadOffset + index);
+          if (uploadJobId) photo.id = uploadPhotoId(index);
           photo.memo = memo;
           return photo;
         }));
-        order.photos.push(...photos);
         order.stepMemos[stepCode] = memo || order.stepMemos[stepCode] || "";
         order.updatedAt = new Date().toISOString();
         addLog(db, order, `${getStep(stepCode).name} 사진 추가`, `${photos.length}장 ${memo || ""}`.trim());
@@ -5221,7 +5228,8 @@ async function handleApi(req, res, pathname) {
             advanced = true;
           }
         }
-        await insertPhotoRows(photos);
+        await insertPhotoRows(photos.filter((photo) => !existingPhotos.includes(photo)));
+        order.photos.push(...photos.filter((photo) => !existingPhotos.includes(photo)));
         if (memo) await upsertStepMemo(order.id, stepCode, memo);
         if (advanced) await updateOrderStateRow(order);
         else await updateOrderTouched(order);

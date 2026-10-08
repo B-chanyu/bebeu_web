@@ -18,6 +18,14 @@ function openEditOrderDialog() {
 
 const uploadReadyImages = new WeakSet();
 
+async function readyUploadFile(media) {
+  if (media.filePromise) await media.filePromise;
+  if (media.fileError) throw media.fileError;
+  const file = media.displayFile || media.file;
+  if (!file) throw new Error("사진을 준비하지 못했습니다. 다시 선택해 주세요.");
+  return file;
+}
+
 async function receiveDroppedPhotos(files, x, y) {
   if (!state.data || !files.length) return;
   if (photoDialog.open) {
@@ -29,6 +37,7 @@ async function receiveDroppedPhotos(files, x, y) {
     await addChatFiles(files);
     return;
   }
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
   const card = document.elementFromPoint(x, y)?.closest("[data-order-card-id]");
   if (card && ["work", "done"].includes(state.tab)) {
     openListPhotoStepPicker(card.dataset.orderCardId, files);
@@ -48,9 +57,14 @@ document.addEventListener("drop", (event) => {
 });
 window.addEventListener("bebeuPhotoDrop", async (event) => {
   try {
-    const photos = event.detail?.photos || [];
+    // Capacitor triggerJSEvent puts data on the Event itself, not detail.
+    const payload = event.detail && typeof event.detail === "object" ? event.detail : event;
+    const photos = Array.isArray(payload.photos) ? payload.photos : [];
+    if (!photos.length) return;
+    const x = Number(payload.x);
+    const y = Number(payload.y);
     const files = await Promise.all(photos.map((photo, index) => nativePhotoFile(photo, index, "drop")));
-    await receiveDroppedPhotos(files, event.detail.x, event.detail.y);
+    await receiveDroppedPhotos(files, x, y);
   } catch (error) {
     alert(error.message || "드래그한 사진을 읽지 못했습니다.");
   }
@@ -137,17 +151,39 @@ async function pickNativeGalleryPhotos() {
   try {
     const result = await camera.pickImages({ quality: 72, width: 1400, height: 1400, limit: availableCount });
     const photos = Array.from(result.photos || []).slice(0, availableCount);
-    const files = new Array(photos.length);
+    const selected = photos.map((photo, index) => ({
+      file: null,
+      displayFile: null,
+      previewUrl: photo.webPath || window.Capacitor.convertFileSrc(photo.path),
+      originalName: `gallery_${Date.now()}_${index + 1}.jpg`,
+      mimeType: "image/jpeg",
+      isVideo: false,
+      sourceLabel: "갤러리",
+      nativePreview: true,
+    }));
+    state.pendingPhotos.push(...selected);
+    renderPendingPhotos("갤러리");
     let nextPhoto = 0;
-    await Promise.all(Array.from({ length: Math.min(2, photos.length) }, async () => {
+    const jobs = new Array(photos.length);
+    const resolvers = selected.map((media, index) => {
+      media.filePromise = new Promise((resolve) => { jobs[index] = resolve; });
+      return jobs[index];
+    });
+    Promise.all(Array.from({ length: Math.min(2, photos.length) }, async () => {
       while (nextPhoto < photos.length) {
         const index = nextPhoto++;
-        const file = await nativePhotoFile(photos[index], index, "gallery");
-        uploadReadyImages.add(file);
-        files[index] = file;
+        try {
+          const file = await nativePhotoFile(photos[index], index, "gallery");
+          uploadReadyImages.add(file);
+          selected[index].file = file;
+          selected[index].displayFile = file;
+        } catch (error) {
+          selected[index].fileError = error;
+        } finally {
+          resolvers[index]();
+        }
       }
-    }));
-    await handleSelectedFiles(files, "갤러리");
+    })).catch(() => {});
   } catch (error) {
     if (!/cancel/i.test(String(error?.message || error))) throw error;
   }
@@ -459,7 +495,7 @@ function renderPendingPhotos(sourceLabel) {
       ${state.pendingPhotos.map((item, index) => `
         <article class="preview-item">
           <button class="preview-delete-button" type="button" data-remove-pending-photo="${index}" aria-label="선택한 사진 제거">×</button>
-          ${item.isVideo ? `<video src="${item.previewUrl}" controls playsinline preload="metadata"></video>` : `<img src="${item.previewUrl}" alt="사진 미리보기">`}
+          ${item.isVideo ? `<video src="${item.previewUrl}" controls playsinline preload="metadata"></video>` : `<img src="${item.previewUrl}" alt="사진 미리보기" loading="lazy" decoding="async">`}
           <span>${escapeHtml(item.originalName)}</span>
         </article>
       `).join("")}
@@ -469,7 +505,7 @@ function renderPendingPhotos(sourceLabel) {
 
 function removePendingPhoto(index) {
   const [removed] = state.pendingPhotos.splice(index, 1);
-  if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+  if (removed?.previewUrl && !removed.nativePreview) URL.revokeObjectURL(removed.previewUrl);
   if (!state.pendingPhotos.length) {
     photoPreview.innerHTML = `<div class="preview-empty">사진 찍기 또는 갤러리를 선택해주세요.</div>`;
     cameraInput.value = "";
@@ -481,7 +517,7 @@ function removePendingPhoto(index) {
 
 function releasePendingPhotos() {
   state.pendingPhotos.forEach((item) => {
-    if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+    if (item.previewUrl && !item.nativePreview) URL.revokeObjectURL(item.previewUrl);
   });
   state.pendingPhotos = [];
 }

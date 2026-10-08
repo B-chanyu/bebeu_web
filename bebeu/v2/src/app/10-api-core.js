@@ -109,28 +109,80 @@ async function uploadPhotosWithRetry(path, formData, retries = 1) {
   }
 }
 
-async function uploadPhotoBatches(order, pendingPhotos, selectedStep, memo, onProgress, advanceAfterUpload = false) {
+async function uploadQueueStore(mode, action) {
+  const db = await new Promise((resolve, reject) => {
+    const request = indexedDB.open("bebeu-photo-outbox", 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("jobs", { keyPath: "id" });
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction("jobs", mode);
+      const request = action(tx.objectStore("jobs"));
+      tx.oncomplete = () => resolve(request.result);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error("사진 임시 저장에 실패했습니다."));
+    });
+  } finally { db.close(); }
+}
+
+let recoveringPhotoUploads = false;
+async function recoverPhotoUploads() {
+  if (recoveringPhotoUploads || !state.currentUserId) return;
+  recoveringPhotoUploads = true;
+  try {
+    const jobs = await uploadQueueStore("readonly", (store) => store.getAll());
+    for (const job of jobs.filter((item) => item.owner === bootstrapCacheKey())) {
+      const order = state.data.orders.find((item) => item.id === job.orderId);
+      if (!order || !confirm(`${order.serial}: 저장되지 않은 사진 전송을 다시 진행할까요?`)) continue;
+      setGlobalLoading("남은 사진 전송 중...");
+      const result = await uploadPhotoBatches(order, [], job.step, job.memo, null, job.advance, job);
+      if (result?.order) replaceOrderInState(result.order);
+      render();
+      showToast("사진 저장이 완료되었습니다.");
+    }
+  } catch (error) { showToast(`사진 임시본은 유지됩니다. ${error.message}`); }
+  finally { setGlobalLoading(""); recoveringPhotoUploads = false; }
+}
+
+async function uploadPhotoBatches(order, pendingPhotos, selectedStep, memo, onProgress, advanceAfterUpload = false, savedJob = null) {
+  const job = savedJob || {
+    id: crypto.randomUUID(), owner: bootstrapCacheKey(), orderId: order.id,
+    step: selectedStep, memo, advance: advanceAfterUpload, offset: 0,
+    files: await Promise.all(pendingPhotos.map(readyUploadFile)),
+  };
+  // Persist all files before starting any network request.
+  await uploadQueueStore("readwrite", (store) => store.put(job));
   let uploadResult = null;
-  const total = pendingPhotos.length;
+  const total = job.files.length;
   const productIndex = 1;
-  for (let start = 0; start < pendingPhotos.length; start += PHOTO_UPLOAD_BATCH_SIZE) {
-    const batch = pendingPhotos.slice(start, start + PHOTO_UPLOAD_BATCH_SIZE);
+  for (let start = job.offset; start < total; start += PHOTO_UPLOAD_BATCH_SIZE) {
+    const uploadFiles = job.files.slice(start, start + PHOTO_UPLOAD_BATCH_SIZE);
+    const batch = uploadFiles;
     const formData = new FormData();
+    formData.append("uploadJobId", job.id);
     formData.append("stepCode", selectedStep);
     formData.append("productIndex", productIndex);
     formData.append("memo", memo);
     formData.append("uploadOffset", start);
-    if (advanceAfterUpload && start + batch.length >= pendingPhotos.length) formData.append("advance", "1");
-    batch.forEach((media) => {
-      const uploadFile = media.displayFile || media.file;
+    if (advanceAfterUpload && start + batch.length >= total) formData.append("advance", "1");
+    batch.forEach((media, index) => {
+      const uploadFile = uploadFiles[index];
       formData.append("files", uploadFile, uploadFile.name || media.originalName);
     });
     onProgress?.(start, total, `사진 업로드 중 (${Math.floor(start / PHOTO_UPLOAD_BATCH_SIZE) + 1}/${Math.ceil(total / PHOTO_UPLOAD_BATCH_SIZE)})`);
     await waitForPaint();
     uploadResult = await uploadPhotosWithRetry(`/api/orders/${order.id}/photo`, formData, 1);
+    if (!Array.isArray(uploadResult.photos) || uploadResult.photos.length !== batch.length) {
+      throw new Error("서버 저장 건수가 일치하지 않습니다. 사진 임시본은 보관됩니다.");
+    }
+    job.offset = start + batch.length;
+    await uploadQueueStore("readwrite", (store) => store.put(job));
     onProgress?.(Math.min(start + batch.length, total), total, "사진 저장 중");
     await waitForPaint();
   }
+  await uploadQueueStore("readwrite", (store) => store.delete(job.id));
   return uploadResult;
 }
 
@@ -191,6 +243,7 @@ async function load() {
   writeBootstrapCache(result.data).catch(() => {});
   applyBootstrapData(result.data, !bootstrapViewInitialized);
   bootstrapViewInitialized = true;
+  recoverPhotoUploads();
 }
 
 function migrateLocalSmsTemplatesToDb() {
