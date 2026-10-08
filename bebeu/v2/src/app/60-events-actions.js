@@ -1,3 +1,10 @@
+  const externalLink = event.target.closest("a.naver-connect-button");
+  if (externalLink && isNativeApp()) {
+    event.preventDefault();
+    try { await openExternalUrl(externalLink.href); }
+    catch (error) { showToast(error.message); }
+    return;
+  }
   const listPhotoAddTarget = event.target.closest("[data-list-photo-add]");
   if (listPhotoAddTarget) {
     event.preventDefault();
@@ -257,7 +264,21 @@
   }
 
   if (target.id === "deliveryLocateButton") {
-    requestDeliveryLocation();
+    requestDeliveryLocation().catch((error) => showToast(error.message));
+    return;
+  }
+
+  if (target.id === "deliveryStartButton") {
+    await startDeliveryTrip();
+    return;
+  }
+  if (target.id === "deliveryPreviousButton" || target.id === "deliveryNextButton") {
+    await changeDeliveryStop(target.id === "deliveryNextButton" ? "next" : "previous");
+    return;
+  }
+  if (target.id === "deliveryEndButton") {
+    await stopDeliveryTrip();
+    showToast("배송을 종료했습니다.");
     return;
   }
 
@@ -314,7 +335,7 @@
   }
 
   if (target.dataset.openDeliveryAddress) {
-    window.open(naverMapSearchUrl(target.dataset.openDeliveryAddress), "_blank", "noopener");
+    await openExternalUrl(kakaoMapSearchUrl(target.dataset.openDeliveryAddress));
     return;
   }
 
@@ -640,6 +661,12 @@
     orderDialog.showModal();
   }
   if (target.id === "logoutButton") {
+    await stopDeliveryTrip();
+    stopDeliveryWorkerTracking();
+    deliveryInitialFocusDone = false;
+    state.deliveryLocation = null;
+    state.deliveryRoute = [];
+    state.deliveryRouteOrigin = null;
     localStorage.removeItem("bebeu.currentUserId");
     localStorage.removeItem(VIEW_STATE_KEY);
     state.currentUserId = "";
@@ -854,10 +881,37 @@ async function batchShareOrders(target) {
 }
 
 async function shareDirectly({ text }) {
+  if (isNativeApp()) {
+    const share = window.Capacitor?.Plugins?.Share;
+    if (!share?.share) throw new Error("공유 기능이 포함된 최신 앱으로 업데이트해주세요.");
+    try {
+      await share.share({ text, dialogTitle: "전송할 앱 선택" });
+    } catch (error) {
+      if (/cancel|dismiss|취소/i.test(error.message || "")) {
+        const cancelled = new Error("공유가 취소되었습니다.");
+        cancelled.name = "AbortError";
+        throw cancelled;
+      }
+      throw error;
+    }
+    return;
+  }
   if (!navigator.share) {
     throw new Error("이 브라우저에서는 공유 선택창을 열 수 없습니다. 다른 브라우저 또는 홈 화면 앱에서 다시 시도해주세요.");
   }
   await navigator.share({ text });
+}
+
+async function openExternalUrl(url) {
+  const absoluteUrl = new URL(url, `${configuredServerBase()}/`).toString();
+  if (!/^https?:\/\//i.test(absoluteUrl)) throw new Error("지원하지 않는 주소입니다.");
+  if (isNativeApp()) {
+    const browser = window.Capacitor?.Plugins?.Browser;
+    if (!browser?.open) throw new Error("외부 페이지 기능이 포함된 최신 앱으로 업데이트해주세요.");
+    await browser.open({ url: absoluteUrl });
+    return;
+  }
+  window.open(absoluteUrl, "_blank", "noopener");
 }
 
 async function postOrderToNaverCafe(orderId) {

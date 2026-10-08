@@ -233,6 +233,7 @@ content.addEventListener("submit", async (event) => {
 
 content.addEventListener("input", (event) => {
   if (event.target.id === "deliveryAddressInput") {
+    if (deliveryTrip.active) return;
     localStorage.setItem(DELIVERY_ADDRESS_STORAGE_KEY, event.target.value);
     state.deliveryRoute = [];
     state.deliveryRouteOrigin = null;
@@ -505,6 +506,57 @@ if (isNativeApp()) {
     history.back();
   });
   nativeBackListener?.catch?.(() => {});
+}
+
+let appUpdateCheckRunning = false;
+let appUpdatePromptedVersion = 0;
+
+async function checkNativeAppUpdate() {
+  const app = nativeAppPlugin();
+  if (!app?.getInfo || appUpdateCheckRunning || document.visibilityState === "hidden") return;
+  if (document.querySelector("dialog[open]") || state.loadingMessage || state.savingPhoto || state.savingOrder) return;
+  appUpdateCheckRunning = true;
+  try {
+    const [installed, response] = await Promise.all([
+      app.getInfo(),
+      fetch(serverUrl(`/app-release.json?t=${Date.now()}`), { cache: "no-store" }),
+    ]);
+    if (!response.ok) return;
+    const release = await response.json();
+    const latestCode = Number(release.versionCode);
+    const installedCode = Number(installed.build);
+    if (!Number.isSafeInteger(latestCode) || !Number.isSafeInteger(installedCode)
+      || latestCode <= installedCode || latestCode === appUpdatePromptedVersion) return;
+    if (document.querySelector("dialog[open]") || state.loadingMessage || state.savingPhoto || state.savingOrder) return;
+    appUpdatePromptedVersion = latestCode;
+    if (confirm(`업데이트가 있습니다.\n새 버전 ${String(release.versionName || latestCode)}을 설치하시겠습니까?`)) {
+      // Keep the destination fixed instead of trusting a URL from release metadata.
+      const store = window.Capacitor?.Plugins?.StoreUpdate;
+      if (store?.openStore) await store.openStore();
+      else window.open("https://play.google.com/store/apps/details?id=cloud.bebeu.work", "_system");
+    }
+  } catch {
+    // Offline checks must not interrupt normal app usage.
+  } finally {
+    appUpdateCheckRunning = false;
+  }
+}
+
+if (isNativeApp()) {
+  checkNativeAppUpdate();
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      checkNativeAppUpdate();
+      if (isDeliveryOnlyUser()) initializeDeliveryTrip().catch(() => {});
+    }
+  });
+  nativeAppPlugin()?.addListener?.("appStateChange", ({ isActive }) => {
+    if (isActive) {
+      checkNativeAppUpdate();
+      if (isDeliveryOnlyUser()) initializeDeliveryTrip().catch(() => {});
+    }
+  })?.catch?.(() => {});
+  setInterval(checkNativeAppUpdate, 60000);
 }
 
 if (!isNativeApp() && "serviceWorker" in navigator) {

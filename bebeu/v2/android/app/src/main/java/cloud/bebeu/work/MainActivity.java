@@ -1,6 +1,9 @@
 package cloud.bebeu.work;
 
 import com.getcapacitor.BridgeActivity;
+import com.getcapacitor.BridgeWebViewClient;
+import android.webkit.WebView;
+import android.webkit.WebResourceRequest;
 import android.os.Bundle;
 import android.view.DragEvent;
 import android.view.DragAndDropPermissions;
@@ -16,7 +19,20 @@ import org.json.JSONObject;
 public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        registerPlugin(StoreUpdatePlugin.class);
+        registerPlugin(DeliveryTripPlugin.class);
         super.onCreate(savedInstanceState);
+        bridge.getWebView().setWebViewClient(new BridgeWebViewClient(bridge) {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                Uri url = request.getUrl();
+                // Keep only the trusted map subframe inside the app; external links stay external.
+                if (!request.isForMainFrame() && "https".equals(url.getScheme())
+                    && "app.bebeu.cloud".equals(url.getHost())
+                    && "/delivery-map.html".equals(url.getPath())) return false;
+                return super.shouldOverrideUrlLoading(view, request);
+            }
+        });
         File[] cachedDrops = getCacheDir().listFiles((dir, name) -> name.startsWith("drop-"));
         if (cachedDrops != null) {
             for (File file : cachedDrops) {
