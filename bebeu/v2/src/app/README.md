@@ -10,6 +10,7 @@ Edit the files in this directory, then rebuild.
 - `10-api-core.js`: API helpers, loading, persistence, base rendering helpers
 - `20-chat-auth.js`: chat, login, admin auth, cafe settings submit
 - `30-me-attendance-notes.js`: my page, attendance, payroll, notes
+- `35-delivery-route.js`: Kakao delivery map, route ordering, driver tracking, delivery sessions
 - `40-orders-list-detail.js`: work/done lists, order cards, detail views, photo boards
 - `50-settings-share.js`: SMS templates, customer share, settings, trash
 - `60-events-actions.js`: click handlers, order actions, selection, lightbox, dialogs

@@ -1,96 +1,47 @@
-# bebeu PWA 프로토타입
+# 베베유 관리자 웹 · Android
 
-사무실 노트북에서 서버를 켜고, 같은 네트워크의 직원 휴대폰에서 설치형 웹앱처럼 사용하는 내부 작업 앱입니다.
+현재 실행 프로젝트입니다. 초기 프로토타입이 아니라 세탁 매장 운영용 PWA와 Android 앱의 공통 코드를 포함합니다.
 
-## 실행
+## 인수인계
 
-프로젝트 폴더에서 아래 파일을 실행합니다.
+**[전체 인수인계 안내](../../docs/HANDOVER.md)**에서 시작하세요.
+
+- [실행·환경변수·배포·백업·복구](../../docs/handover/OPERATIONS.md)
+- [코드와 데이터 구조](../../docs/handover/ARCHITECTURE.md)
+- [기능 확인표와 보안 한계](../../docs/handover/ACCEPTANCE.md)
+- [Android 빌드 안내](../../docs/android-release.md)
+- [카카오 배송 지도](docs/KAKAO_DELIVERY.md)
+
+인계 기준 브랜치는 `codex/android-app`, Android 버전은 1.16 / versionCode 17입니다.
+운영 주소는 https://app.bebeu.cloud 이며, Android는 로컬에 포함된 화면 자산으로 같은 서버 API를 호출합니다.
+운영 DB·사진·환경설정·서명키는 Git에 없으므로 별도 인계가 필요합니다.
+
+## 개발 환경 실행
+
+Node.js 22 이상과 MariaDB를 준비하고 이 디렉터리에서 실행합니다.
 
 ```powershell
-.\start-bebeu.ps1
+npm ci
+Copy-Item .env.example .env
+# .env에 개발 전용 DB, 사진/로그 경로와 초기 암호 설정
+npm start
 ```
 
-직접 실행하려면 이렇게 실행합니다.
+기존 `.env`는 덮어쓰지 마세요. 기본 접속은 `http://localhost:3000`입니다.
+첫 DB 구성은 운영 안내를 따르세요. **`database/schema.sql`은 DROP TABLE을 포함하므로 운영 DB에 실행하면 안 됩니다.**
+저장소의 배치 실행 파일에는 `D:` 고정 경로와 DB 환경변수 설정이 남아 있으므로 인수자의 환경에 맞춰 확인해야 합니다.
+
+## 수정 위치
+
+`src/app`의 기능별 파일을 수정하고 `npm run build:app`으로 `public/app.js`를 생성합니다.
+일반 스타일은 `public/styles.css`, 서버는 `server.js`, 배송 경로 계산은 `lib/kakao-delivery.js`입니다.
+Android 전용 구현은 `android/app/src/main/java/cloud/bebeu/work`에 있습니다.
 
 ```powershell
-$env:PHOTO_ROOT = ".\bebeu_image"
-$env:MYSQL_HOST = "127.0.0.1"
-$env:MYSQL_PORT = "3306"
-$env:MYSQL_USER = "root"
-$env:MYSQL_PASSWORD = "1234"
-$env:MYSQL_DATABASE = "bebeu"
-node server.js
+npm run check
+node --test tests/kakao-delivery.test.js
 ```
 
-PC에서는 아래 주소로 접속합니다.
-
-```text
-http://localhost:3000
-```
-
-같은 와이파이에 연결된 휴대폰에서는 실행 화면에 표시되는 내부 IP 주소로 접속합니다.
-
-```text
-http://서버노트북IP:3000
-```
-
-## 휴대폰에 앱처럼 설치
-
-1. 직원 휴대폰을 서버 노트북과 같은 와이파이에 연결합니다.
-2. Chrome 또는 Safari에서 `http://서버노트북IP:3000`으로 접속합니다.
-3. 앱 첫 화면의 `설치` 버튼을 누릅니다.
-4. 설치 버튼이 동작하지 않으면 브라우저 메뉴에서 `홈 화면에 추가` 또는 `앱 설치`를 선택합니다.
-
-## 사진 저장 위치
-
-기본 저장 위치는 프로젝트 폴더 안의 아래 폴더입니다.
-
-```text
-.\bebeu_image
-```
-
-사진은 다음 구조로 저장됩니다.
-
-```text
-.\bebeu_image\bebeu\2026-06\A190\01\
-.\bebeu_image\bebeu\2026-06\A190\02\
-.\bebeu_image\bebeu\2026-06\A190\03\
-.\bebeu_image\bebeu\2026-06\A190\04\
-.\bebeu_image\bebeu\2026-06\A190\05\
-```
-
-주문/사진/근태 정보는 MariaDB의 `bebeu` 데이터베이스에 저장됩니다. 테이블 스키마는 `database\schema.sql`에 있습니다.
-
-## 현재 포함된 기능
-
-- 4개 하단 탭: 내 정보/근태, 진행 중, 완료, 요청/문서/설정
-- 휴대폰 홈 화면 설치 안내
-- 주문 추가
-- 품번 기본 검색, 전화번호/주소/제품/작업자 보조 검색
-- 날짜/단계 필터
-- 품번 상세 화면
-- 5단계 작업 흐름: 01 수거, 02 탈거/해체, 03 세탁, 04 조립&소독, 05 배송
-- 단계별 사진 슬라이드
-- 사진 0장이어도 확인 후 다음 단계 이동
-- 사진 찍기 / 갤러리에서 고르기
-- 사진 추가 시 미리보기/메모 컨펌
-- 배송 단계 확인 시 완료 탭 이동
-- 모든 사진 기본 내보내기 화면
-
-## 품번 규칙
-
-현재 프로토타입은 사용자가 입력한 품번을 그대로 사용합니다.
-
-```text
-A190: 배달
-B140: 현장 픽업
-```
-
-`A`로 시작하면 배달, 그 외에는 현장 픽업으로 표시합니다.
-
-## 같은 네트워크에서 접속이 안 될 때
-
-- 서버 노트북과 휴대폰이 같은 와이파이에 연결되어 있는지 확인합니다.
-- 실행 화면에 표시된 IP 주소를 휴대폰에서 입력합니다.
-- Windows 방화벽에서 Node.js 또는 3000번 포트의 내부 네트워크 접근을 허용합니다.
-- 서버 노트북이 절전 모드로 들어가지 않도록 설정합니다.
+위 검사는 문법/텍스트 검사와 일부 경로 계산 테스트이며 통합·보안·실기기 검증을 대신하지 않습니다.
+관리 모드 시작은 `npm run serve:managed`, 실행 중 변경 적용은 `npm run reload:managed`입니다.
+Git 푸시만으로 운영 서버 배포나 Play 업데이트가 자동 실행되지는 않습니다.
